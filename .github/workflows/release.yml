@@ -1,38 +1,66 @@
 name: Release
 
-# Tag a commit to cut a release:
-#   git tag v0.1.0 && git push origin v0.1.0
-# The release is created as a draft, so nothing is public until you publish it.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and publish
+        required: true
+        type: string
+        default: v0.5.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    outputs:
+      id: ${{ steps.release.outputs.id }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      source_sha: ${{ steps.release.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - name: Validate version and create one shared draft
+        id: release
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const release = require('./scripts/release.cjs');
+            await release.prepareRelease({ github, context, core });
 
+  build:
+    name: Build (${{ matrix.platform }})
+    needs: prepare
+    permissions:
+      contents: write
     strategy:
-      # One platform failing should still leave you the other's installer.
       fail-fast: false
       matrix:
         include:
-          # tauri.conf.json targets nsis, which is Windows-only, so Linux
-          # compiled fine and bundled nothing. Each platform names its own.
           - platform: windows-latest
             args: --bundles nsis
           - platform: ubuntu-22.04
             args: --bundles deb,appimage
-
     runs-on: ${{ matrix.platform }}
-
     steps:
-      - uses: actions/checkout@v4
-
-      # webkit2gtk is Tauri's webview, libasound2 is what cpal decodes through,
-      # and libdbus is pulled in by souvlaki's MPRIS backend even though the
-      # media-controls module itself is Windows-only.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
       - name: Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -48,41 +76,49 @@ jobs:
             build-essential \
             patchelf \
             file
-
       - uses: oven-sh/setup-bun@v2
-
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
-
       - run: bun install --frozen-lockfile
-
-      # tauri-action runs the beforeBuildCommand from tauri.conf.json, bundles
-      # the installers, and attaches them to the release.
-      - uses: tauri-apps/tauri-action@v0
+      - name: Build and upload installers to the shared release
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: capsule ${{ github.ref_name }}
+          releaseId: ${{ needs.prepare.outputs.id }}
+          tagName: ${{ needs.prepare.outputs.tag }}
           args: ${{ matrix.args }}
           releaseDraft: true
           prerelease: false
-          releaseBody: |
-            ## Downloads
+      - name: Save installers as workflow artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: installers-${{ matrix.platform }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
 
-            **Windows** - `.exe` installer. Windows will warn that the
-            publisher is unknown; the build is unsigned. Choose *More info* then
-            *Run anyway*, or build it yourself from source.
-
-            **Linux** - `.deb` or `.AppImage`. Local files and Navidrome only:
-            Apple Music needs Widevine, which the Linux webview does not have.
-            The acrylic window material is also Windows-only and falls back to
-            the solid theme. The `.AppImage` needs webkit2gtk-4.1, libasound2,
-            libdbus-1 and a running keyring; the `.deb` pulls those in.
-
-            Last.fm and Discord Rich Presence are inactive in these builds -
-            they need keys, and shipping keys in a public binary would mean
-            shipping them to everyone. See `.env.example` if you want them.
+  publish:
+    name: Verify installers and publish as latest
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_ID: ${{ needs.prepare.outputs.id }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/github-script@v9
+        with:
+          script: |
+            const release = require('./scripts/release.cjs');
+            await release.publishRelease({ github, context, core });
