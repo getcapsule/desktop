@@ -1,23 +1,8 @@
-//! Windows-only frameless-window plumbing.
-//!
-//! `decorations(false)` removes not just the titlebar but the OS's resize
-//! borders and - critically - the maximize button's `HTMAXBUTTON` hit result,
-//! which is what makes the Windows 11 Snap Layouts flyout appear on hover. This
-//! subclass restores both:
-//!
-//! - resize borders on all four edges and corners, so the window still resizes;
-//! - `HTMAXBUTTON` over our custom maximize button's rect, so Snap Layouts work,
-//!   with `WM_NCLBUTTONUP` there toggling maximize (Windows now owns that click).
-//!
-//! Everything else falls through to the default proc as `HTCLIENT`, so the DOM
-//! and Tauri's `data-tauri-drag-region` keep working for the rest of the bar.
-
 #![cfg(target_os = "windows")]
 #![allow(clippy::fn_to_numeric_cast)]
 
 use tauri::WebviewWindow;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, GetWindowRect, PostMessageW, SetWindowLongPtrW, GWLP_WNDPROC, HTBOTTOM,
@@ -145,11 +130,4 @@ fn is_maximized(hwnd: HWND) -> bool {
     } else {
         false
     }
-}
-
-#[allow(dead_code)]
-fn to_client(hwnd: HWND, x: i32, y: i32) -> (i32, i32) {
-    let mut p = windows::Win32::Foundation::POINT { x, y };
-    unsafe { let _ = ScreenToClient(hwnd, &mut p); }
-    (p.x, p.y)
 }

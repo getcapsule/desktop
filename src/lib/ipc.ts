@@ -1,9 +1,3 @@
-// The only place the UI is allowed to touch Rust.
-//
-// Keeping every invoke and event subscription behind this module is what makes
-// the renderer-agnostic boundary real: no business logic, no Apple calls, and
-// no persistence anywhere in the frontend.
-
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
@@ -110,8 +104,6 @@ export interface NavidromeStatus {
 
 export const navidrome = {
   status: () => invoke<NavidromeStatus>('navidrome_status'),
-  // The password goes straight to the credential store on the Rust side; it is
-  // never held in frontend state beyond this call.
   connect: (url: string, username: string, password: string) =>
     invoke<void>('navidrome_connect', { url, username, password }),
 }

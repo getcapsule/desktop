@@ -3,9 +3,6 @@
 .env.local
 *.p8
 
-# leftover abandoned Next.js scaffold; has its own .git, would corrupt this index
-saintnote/
-
 # rust
 /src-tauri/target/
 
@@ -26,9 +23,13 @@ Thumbs.db
 
 # logs
 *.log
+*.bak
 
 # working notes stay local README is the only published document
 *.md
 !/README.md
 docs/images/frame.html
 .impeccable
+brag-output
+.codex
+docs

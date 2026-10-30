@@ -2,9 +2,7 @@ use serde::Deserialize;
 
 use crate::db::{AlbumUpsert, ArtistUpsert, PlaylistUpsert, SongUpsert};
 
-/// Subsonic protocol version we claim. 1.16.1 is what Navidrome implements.
 pub const API_VERSION: &str = "1.16.1";
-/// Client identifier sent as `c`; servers log this.
 pub const CLIENT_NAME: &str = "capsule";
 
 #[derive(Debug, thiserror::Error)]

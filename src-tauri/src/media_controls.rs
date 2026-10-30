@@ -1,19 +1,3 @@
-//! OS media controls: the Windows SMTC flyout and the Linux MPRIS interface.
-//!
-//! Both give the desktop a now-playing card and route hardware media keys back
-//! to the player.
-//!
-//! Two hazards this module is built around, both Windows-only:
-//!
-//! - The SMTC COM object is apartment-threaded and **not `Send`**. It is created
-//!   on the main thread, its button callback is delivered via the main window's
-//!   WndProc (main thread), and every update is funnelled back to the main
-//!   thread with `run_on_main_thread`. The `unsafe impl Send` is sound only
-//!   because of that discipline. The MPRIS backend is a channel to its own
-//!   thread and needs none of it.
-//! - souvlaki subclasses the main window to receive SMTC messages, and so does
-//!   [`crate::snap`]. Install snap *first* so souvlaki's `SetWindowSubclass`
-//!   chains on top of it; both then see their messages.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -27,7 +11,6 @@ use crate::player::{PlayerState, Status};
 use crate::AppState;
 
 struct Controls(MediaControls);
-// SAFETY: see the module docs - only ever touched on the main thread.
 #[cfg(target_os = "windows")]
 unsafe impl Send for Controls {}
 
