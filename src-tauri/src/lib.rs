@@ -1,29 +1,40 @@
-
 pub mod api;
-pub mod audio;
 pub mod artwork;
+pub mod appearance;
+pub mod audio;
+pub mod downloads;
+pub mod audio_queue;
+mod soundcloud_playback;
 pub mod auth;
 pub mod commands;
 pub mod config;
 pub mod db;
 pub mod discord;
-pub mod engine;
+pub mod import;
 pub mod lastfm;
 pub mod local;
 pub mod lyrics;
 pub mod media_controls;
 pub mod player;
+pub mod qol;
+pub mod desktop;
 pub mod settings;
+#[cfg(target_os = "windows")]
+pub mod snap;
 pub mod source;
+pub mod soundcloud;
+pub mod spotify;
 pub mod stream;
 pub mod subsonic;
 pub mod suspend;
-#[cfg(target_os = "windows")]
-pub mod snap;
-#[cfg(target_os = "windows")]
-pub mod thumbbar;
 pub mod sync;
 pub mod theme;
+pub mod theme_files;
+#[cfg(target_os = "windows")]
+pub mod thumbbar;
+pub mod webview;
+pub mod youtube_embed;
+pub mod youtube_native;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -35,6 +46,7 @@ use player::Player;
 #[derive(Default)]
 pub struct NowReported {
     pub track_id: Option<String>,
+    pub queue_index: Option<usize>,
     pub scrobbled: bool,
 }
 
@@ -45,13 +57,13 @@ pub struct AppState {
     pub settings: Mutex<settings::Settings>,
     pub data_dir: Mutex<Option<std::path::PathBuf>>,
     pub navidrome: Mutex<Option<std::sync::Arc<subsonic::Client>>>,
+    pub spotify: spotify::State,
     pub audio: Mutex<Option<std::sync::Arc<audio::Engine>>>,
     pub discord: Mutex<Option<std::sync::Arc<discord::Presence>>>,
     pub lastfm: Mutex<Option<lastfm::Session>>,
     pub now_reported: Mutex<NowReported>,
     pub db_generation: std::sync::atomic::AtomicU64,
     pub sync: sync::SyncGuard,
-    pub login_prompted: AtomicBool,
     pub engine_ready: AtomicBool,
     pub media_controls: media_controls::Handle,
     pub theme: Mutex<theme::Theme>,
@@ -66,13 +78,13 @@ impl AppState {
             settings: Mutex::new(settings::Settings::default()),
             data_dir: Mutex::new(None),
             navidrome: Mutex::new(None),
+            spotify: spotify::State::default(),
             audio: Mutex::new(None),
             discord: Mutex::new(None),
             lastfm: Mutex::new(None),
             now_reported: Mutex::new(NowReported::default()),
             db_generation: std::sync::atomic::AtomicU64::new(0),
             sync: sync::SyncGuard::default(),
-            login_prompted: AtomicBool::new(false),
             engine_ready: AtomicBool::new(false),
             media_controls: media_controls::Handle::default(),
             theme: Mutex::new(theme::resolve(&theme::presets(), theme::DEFAULT_THEME_ID)),
@@ -127,7 +139,12 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
-    let theme = app.state::<AppState>().theme.lock().expect("theme mutex").clone();
+    let theme = app
+        .state::<AppState>()
+        .theme
+        .lock()
+        .expect("theme mutex")
+        .clone();
     let css = theme.css();
 
     #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
@@ -137,7 +154,12 @@ fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
         .min_inner_size(880.0, 560.0)
         .resizable(true)
         .decorations(false)
-        .transparent(glass != "none")
+        // Tao's shadow frame reserves a visible 1px non-client top strip.
+        // Rounded corners are requested separately through DWM.
+        .shadow(false)
+        // Keep the host capable of live material changes. Solid mode paints
+        // opaque CSS surfaces, so switching modes never recreates the player.
+        .transparent(true)
         .initialization_script(format!(
             r#"(function () {{
                 var v = {};
@@ -165,8 +187,13 @@ fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
         main.clone().on_window_event(move |event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 api.prevent_close();
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.destroy();
+                if desktop::should_close_to_tray(&app) {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                        suspend::suspend(&w);
+                    }
+                } else {
+                    app.exit(0);
                 }
             }
             tauri::WindowEvent::Resized(size) => {
@@ -197,17 +224,8 @@ fn open_main_window(app: &tauri::AppHandle, glass: &str) -> tauri::Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        use window_vibrancy::{apply_acrylic, apply_mica};
-        let g = theme.ground;
-        let applied = match glass {
-            "acrylic-chrome" | "acrylic-all" => {
-                apply_acrylic(&main, Some((g.r, g.g, g.b, 24))).map(|_| "acrylic")
-            }
-            "mica" => apply_mica(&main, Some(theme.is_dark())).map(|_| "mica"),
-            _ => Ok("none"),
-        };
-        match applied {
-            Ok(m) => tracing::info!(material = m, variant = %glass, "window material"),
+        match appearance::apply(&main, glass, &theme) {
+            Ok(()) => tracing::info!(variant = %glass, "window material"),
             Err(e) => tracing::warn!(error = %e, variant = %glass, "material unavailable"),
         }
 
@@ -228,8 +246,14 @@ fn show_main(app: &tauri::AppHandle) {
         let _ = w.set_focus();
         return;
     }
-    // Destroyed on close to free the webview; rebuild it.
-    let glass = app.state::<AppState>().settings.lock().expect("settings mutex").appearance.glass.clone();
+    let glass = app
+        .state::<AppState>()
+        .settings
+        .lock()
+        .expect("settings mutex")
+        .appearance
+        .glass
+        .clone();
     if let Err(e) = open_main_window(app, &glass) {
         tracing::error!(error = %e, "could not reopen the main window");
     }
@@ -239,21 +263,49 @@ fn init_tracing() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,capsule_lib=debug"));
-    tracing_subscriber::registry().with(fmt::layer().compact()).with(filter).init();
+    tracing_subscriber::registry()
+        .with(fmt::layer().compact())
+        .with(filter)
+        .init();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
 
-    let runtime = config::Runtime::from_env();
     tracing::info!("capsule starting ({})", config::describe());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .register_asynchronous_uri_scheme_protocol(artwork::SCHEME, artwork::handle)
+        .register_uri_scheme_protocol(youtube_embed::SCHEME, |_context, request| {
+            youtube_embed::resource(&request)
+        })
         .invoke_handler(tauri::generate_handler![
             commands::player_snapshot,
+            qol::qol_snapshot,
+            qol::qol_navigation_set,
+            qol::qol_favorite,
+            qol::qol_favorites,
+            qol::qol_playlist_add,
+            qol::qol_play,
+            qol::qol_queue_add,
+            qol::qol_queue_move,
+            qol::qol_queue_remove,
+            qol::qol_queue_clear,
+            qol::qol_queue_undo,
+            qol::qol_queue_jump,
+            qol::qol_reveal,
+            import::playback::import_retry_playback,
+            soundcloud_playback::soundcloud_play,
+            soundcloud::commands::discover_search,
+            soundcloud::commands::discover_artist_tracks,
+            soundcloud::commands::discover_album_tracks,
+            desktop::desktop_snapshot,
+            desktop::desktop_preferences,
+            desktop::desktop_sleep,
+            desktop::desktop_devices,
+            desktop::desktop_output,
             commands::player_play,
             commands::player_pause,
             commands::player_toggle,
@@ -263,21 +315,41 @@ pub fn run() {
             commands::player_set_volume,
             commands::player_toggle_shuffle,
             commands::player_cycle_repeat,
-            commands::auth_status,
-            commands::auth_show_login,
             commands::navidrome_connect,
             commands::navidrome_status,
+            spotify::spotify_status,
+            spotify::spotify_connect,
+            spotify::spotify_disconnect,
+            youtube_embed::youtube_embed_event,
+            import::jobs::import_detect,
+            import::jobs::import_credential,
+            import::jobs::import_credential_status,
+            import::jobs::import_job,
+            import::jobs::import_status,
+            import::jobs::import_jobs,
+            import::jobs::import_preview,
+            import::jobs::import_confirm,
+            import::jobs::import_cancel,
+            import::jobs::import_resume,
+            import::jobs::import_resolve,
+            import::jobs::import_entries,
+            import::jobs::import_candidates,
+            import::jobs::import_choose,
+            import::jobs::import_invalidate,
+            import::jobs::import_rename,
+            import::jobs::import_reorder,
+            import::jobs::import_remove,
+            import::jobs::import_playback_settings,
+            import::jobs::import_set_playback_settings,
+            import::jobs::import_source_preference,
+            import::jobs::import_link_source,
             commands::lastfm_status,
             commands::lastfm_connect,
             commands::lastfm_disconnect,
-            commands::dev_load_recent,
             commands::dev_diagnostics,
-            commands::engine_ready,
-            commands::engine_tokens,
-            commands::engine_event,
-            commands::engine_log,
             commands::library_songs,
             commands::library_albums,
+            commands::library_artists,
             commands::library_playlists,
             commands::library_album_songs,
             commands::library_playlist_songs,
@@ -285,9 +357,23 @@ pub fn run() {
             commands::library_counts,
             commands::library_sync,
             commands::lyrics_for,
+            commands::lyrics_refresh,
+            commands::lyrics_set_offset,
+            commands::audio_info,
+            downloads::downloads_start,
+            downloads::downloads_snapshot,
+            downloads::downloads_directory,
+            downloads::downloads_cancel,
+            downloads::downloads_retry,
+            downloads::downloads_reveal,
             commands::settings_get,
             commands::settings_set,
             commands::themes_list,
+            theme_files::themes_document,
+            theme_files::themes_preview,
+            theme_files::themes_save,
+            theme_files::themes_import,
+            theme_files::themes_export,
             commands::play_songs,
             commands::play_album,
             commands::play_playlist,
@@ -297,7 +383,10 @@ pub fn run() {
 
             let data_dir = app.path().app_data_dir().ok();
 
-            let loaded = data_dir.as_ref().map(|d| settings::load(d)).unwrap_or_default();
+            let loaded = data_dir
+                .as_ref()
+                .map(|d| settings::load(d))
+                .unwrap_or_default();
             let active_source = loaded.source;
 
             if let Some(dir) = data_dir.as_ref() {
@@ -319,10 +408,24 @@ pub fn run() {
                 Err(e) => tracing::warn!(error = %e, "could not count library"),
             }
             app.manage(AppState::new(database));
+            app.manage(youtube_embed::State::default());
+            app.manage(youtube_native::State::default());
+            app.manage(soundcloud::commands::State::default());
+            app.manage(soundcloud_playback::State::default());
+            app.manage(downloads::State::default());
+            app.manage(import::playback::State::default());
+            if let Some(directory) = data_dir.as_deref() {
+                if import::jobs::initialize(&handle, directory).is_err() {
+                    tracing::warn!("Import library unavailable; existing providers remain usable.");
+                }
+            }
 
             if loaded.discord_enabled() {
                 let id = loaded.discord_client_id().to_string();
-                *app.state::<AppState>().discord.lock().expect("discord mutex") =
+                *app.state::<AppState>()
+                    .discord
+                    .lock()
+                    .expect("discord mutex") =
                     Some(std::sync::Arc::new(discord::Presence::new(id)));
             }
             audio::start_ticker(handle.clone());
@@ -361,30 +464,44 @@ pub fn run() {
             {
                 let state = app.state::<AppState>();
                 let dir = state.data_dir.lock().expect("data dir mutex").clone();
-                let id = state.settings.lock().expect("settings mutex").appearance.theme.clone();
+                let id = state
+                    .settings
+                    .lock()
+                    .expect("settings mutex")
+                    .appearance
+                    .theme
+                    .clone();
                 let all = theme::load_all(dir.as_deref());
                 *state.theme.lock().expect("theme mutex") = theme::resolve(&all, &id);
             }
 
             let glass = std::env::var("CAPSULE_GLASS").unwrap_or_else(|_| {
-                app.state::<AppState>().settings.lock().expect("settings mutex").appearance.glass.clone()
+                app.state::<AppState>()
+                    .settings
+                    .lock()
+                    .expect("settings mutex")
+                    .appearance
+                    .glass
+                    .clone()
             });
 
-            engine::apply_webview_flags(matches!(
-                active_source,
-                settings::Source::Apple | settings::Source::Spotify
-            ));
+            webview::apply_webview_flags();
+            desktop::initialize(&handle);
+            commands::reconcile_backend(&handle, active_source);
+            qol::initialize(&handle);
             open_main_window(&handle, &glass)?;
 
             build_tray(app)?;
-
-            commands::reconcile_backend(&handle, active_source);
-            if runtime.show_engine_window {
-                tracing::warn!("SHOW_ENGINE_WINDOW is set - engine webview is visible");
-            }
+            import::jobs::repair_missing_metadata(&handle);
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running capsule");
+        .build(tauri::generate_context!())
+        .expect("error while building capsule")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                qol::flush(app);
+                desktop::shutdown(app);
+            }
+        });
 }

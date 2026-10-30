@@ -1,23 +1,34 @@
-
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
-use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::auth::{self, AuthStatus};
+use crate::auth;
 use crate::db::{AlbumRow, LibraryCounts, PlaylistRow, SongRow};
-use crate::engine;
+
 use crate::player::{EngineCommand, Player, PlayerState, Track};
 use crate::{sync, AppState, NowReported};
 
+#[tauri::command]
+pub fn audio_info(state: State<'_, AppState>) -> crate::audio::AudioInfo {
+    state
+        .audio
+        .lock()
+        .expect("audio mutex")
+        .as_ref()
+        .map(|engine| engine.audio_info())
+        .unwrap_or_default()
+}
+
 pub fn apply(app: &AppHandle, f: impl FnOnce(&mut Player) -> Vec<EngineCommand>) {
+    crate::youtube_native::reconcile_handoff(app);
     let state = app.state::<AppState>();
     let cmds = {
         let mut p = state.player.lock().expect("player mutex");
         f(&mut p)
     };
     commit(app, &state, cmds);
+    crate::youtube_native::queue_changed(app);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,9 +43,9 @@ pub enum NativeAction {
 
 pub fn native_action(cmd: &EngineCommand) -> NativeAction {
     match cmd {
-        EngineCommand::SetQueue { .. }
-        | EngineCommand::SkipNext
-        | EngineCommand::SkipPrevious => NativeAction::LoadCurrent,
+        EngineCommand::SetQueue { .. } | EngineCommand::SkipNext | EngineCommand::SkipPrevious => {
+            NativeAction::LoadCurrent
+        }
         EngineCommand::Play => NativeAction::Play,
         EngineCommand::Pause => NativeAction::Pause,
         EngineCommand::Seek { ms } => NativeAction::Seek(*ms),
@@ -46,25 +57,46 @@ pub fn native_action(cmd: &EngineCommand) -> NativeAction {
 }
 
 fn commit(app: &AppHandle, state: &AppState, cmds: Vec<EngineCommand>) {
+    if cmds.is_empty()
+        && state.player.lock().expect("player mutex").state().status != crate::player::Status::Ended
+    {
+        publish(app, state);
+        return;
+    }
+    if crate::import::playback::dispatch(app, state, &cmds) {
+        publish(app, state);
+        return;
+    }
+    crate::import::playback::release(app);
+    let source = state.settings.lock().expect("settings mutex").source;
+    if source != crate::settings::Source::Youtube {
+        crate::youtube_native::stop(app);
+    }
+    if source == crate::settings::Source::Youtube {
+        crate::youtube_native::send_library(app, cmds);
+        publish(app, state);
+        return;
+    }
     let engine = state.audio.lock().expect("audio mutex").clone();
     for c in &cmds {
         tracing::debug!(?c, "engine command");
         match &engine {
-
             Some(engine) => run_native(app, state, engine, c),
             None => {
-                if let Err(e) = engine::send(app, c) {
-                    tracing::warn!(?c, error = %e, "failed to send engine command");
-                }
+                let _ = app.emit("playback://error", "No native audio output is available.");
             }
         }
     }
     publish(app, state);
 }
 
-fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, cmd: &EngineCommand) {
+fn run_native(
+    app: &AppHandle,
+    state: &AppState,
+    engine: &crate::audio::Engine,
+    cmd: &EngineCommand,
+) {
     let action = match native_action(cmd) {
-
         NativeAction::Play if engine.is_empty() && !engine.is_loading() => {
             NativeAction::LoadCurrent
         }
@@ -77,8 +109,13 @@ fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, 
         NativeAction::Seek(ms) => engine.seek(ms),
         NativeAction::Volume(p) => engine.set_volume(p),
         NativeAction::LoadCurrent => {
-            let track =
-                state.player.lock().expect("player mutex").state().current().cloned();
+            let track = state
+                .player
+                .lock()
+                .expect("player mutex")
+                .state()
+                .current()
+                .cloned();
             let Some(track) = track else { return };
 
             let source = state.settings.lock().expect("settings mutex").source;
@@ -119,6 +156,7 @@ fn run_native(app: &AppHandle, state: &AppState, engine: &crate::audio::Engine, 
 
 pub(crate) fn publish(app: &AppHandle, state: &AppState) {
     let snapshot = state.player.lock().expect("player mutex").state().clone();
+    crate::qol::observe(app, &snapshot);
     if let Err(e) = app.emit("player://state", &snapshot) {
         tracing::warn!(error = %e, "failed to emit player state");
     }
@@ -137,22 +175,25 @@ fn report_now_playing(app: &AppHandle, state: &AppState, snapshot: &PlayerState)
     let mut last = state.now_reported.lock().expect("now reported mutex");
 
     if stopped {
-
         if last.track_id.is_some() {
             last.track_id = None;
+            last.queue_index = None;
             last.scrobbled = false;
             let presence = state.discord.lock().expect("discord mutex").clone();
             if let Some(p) = presence {
-                std::thread::spawn(move || p.clear());
+                let ticket = p.begin_update();
+                std::thread::spawn(move || p.clear_current(ticket));
             }
         }
         return;
     }
 
     let Some(track) = track else { return };
-    let changed = last.track_id.as_deref() != Some(track.id.as_str());
+    let changed =
+        last.track_id.as_deref() != Some(track.id.as_str()) || last.queue_index != snapshot.index;
     if changed {
         last.track_id = Some(track.id.clone());
+        last.queue_index = snapshot.index;
         last.scrobbled = false;
         scrobble(app, &track, snapshot.position_ms, false);
         present(app, track.clone(), snapshot.status);
@@ -202,7 +243,16 @@ fn scrobble(app: &AppHandle, track: &Track, position_ms: u64, submission: bool) 
 
     let client = { state.navidrome.lock().expect("navidrome mutex").clone() };
     let Some(client) = client else { return };
-    let track_id = track.id.clone();
+    let track_id = if crate::import::playback::owns_current(app) {
+        match crate::import::playback::active_route(app) {
+            Some(route) if route.provider == crate::import::model::Platform::Navidrome => {
+                route.external_id
+            }
+            _ => return,
+        }
+    } else {
+        track.id.clone()
+    };
     tauri::async_runtime::spawn(async move {
         if let Err(e) = client.scrobble(&track_id, submission).await {
             tracing::debug!(error = %e, %track_id, submission, "scrobble rejected");
@@ -211,26 +261,63 @@ fn scrobble(app: &AppHandle, track: &Track, position_ms: u64, submission: bool) 
 }
 
 fn present(app: &AppHandle, track: Track, status: crate::player::Status) {
+    let presence = {
+        app.state::<AppState>()
+            .discord
+            .lock()
+            .expect("discord mutex")
+            .clone()
+    };
+    let Some(presence) = presence else { return };
+    let ticket = presence.begin_update();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
-        let presence = { state.discord.lock().expect("discord mutex").clone() };
-        let Some(presence) = presence else { return };
 
-        let (from_server, api_key) = {
+        let (from_server, api_key, source) = {
             let s = state.settings.lock().expect("settings mutex");
-            (s.discord.serve_art_from_server, s.api_key().to_string())
+            (
+                s.discord.serve_art_from_server,
+                s.api_key().to_string(),
+                s.source,
+            )
         };
 
-        let image = if from_server {
-            let client = { state.navidrome.lock().expect("navidrome mutex").clone() };
-            client.map(|c| c.cover_art_url(&track.id, 300))
+        let route = crate::import::playback::active_route(&app);
+        let artwork = {
+            let provider = state.db.lock().expect("db mutex");
+            let imports = app.try_state::<crate::import::State>();
+            let imports = imports
+                .as_ref()
+                .map(|state| state.db.lock().expect("import db mutex"));
+            crate::discord::library_artwork(
+                imports.as_deref(),
+                &provider,
+                &track.id,
+                route.as_ref(),
+                source,
+                from_server,
+            )
+        };
+        let image = match artwork {
+            Some(crate::discord::CoverArt::PublicUrl(url)) => Some(url),
+            Some(crate::discord::CoverArt::NavidromeId(id)) => {
+                let client = { state.navidrome.lock().expect("navidrome mutex").clone() };
+                client.map(|client| client.cover_art_url(&id, 300))
+            }
+            None => None,
+        };
+        let image = image.filter(|url| url.chars().count() <= 300);
+        let image = if image.is_some() {
+            image
         } else {
             let http = reqwest::Client::new();
-            crate::lastfm::album_art(&http, &api_key, &track.artist, &track.album).await
+            crate::lastfm::album_art(&http, &api_key, &track.artist, &track.album)
+                .await
+                .and_then(|url| crate::discord::public_artwork_url(&url))
         };
 
-        std::thread::spawn(move || presence.show(&track, status, image.as_deref()));
+        std::thread::spawn(move || presence.show(ticket, &track, status, image.as_deref()));
     });
 }
 
@@ -277,7 +364,11 @@ pub fn player_seek(app: AppHandle, state: State<'_, AppState>, ms: u64) {
 
 #[tauri::command]
 pub fn player_set_volume(app: AppHandle, state: State<'_, AppState>, percent: u8) {
-    let cmds = state.player.lock().expect("player mutex").set_volume(percent);
+    let cmds = state
+        .player
+        .lock()
+        .expect("player mutex")
+        .set_volume(percent);
     commit(&app, &state, cmds);
 }
 
@@ -293,208 +384,58 @@ pub fn player_cycle_repeat(app: AppHandle, state: State<'_, AppState>) {
     commit(&app, &state, cmds);
 }
 
-#[tauri::command]
-pub fn auth_status(state: State<'_, AppState>) -> AuthStatus {
-    let tokens = state.tokens.lock().expect("tokens mutex");
-    match tokens.as_ref() {
-        Some(t) if t.is_complete() => {
-            AuthStatus { authenticated: true, storefront: Some(t.storefront.clone()) }
-        }
-        _ => AuthStatus { authenticated: false, storefront: None },
-    }
-}
-
-#[tauri::command]
-pub fn auth_show_login(app: AppHandle) -> Result<(), String> {
-    engine::show_for_login(&app).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn engine_log(msg: String) {
-    tracing::info!(target: "engine", "{msg}");
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ReadyPayload {
-    pub ok: bool,
-    #[serde(default)]
-    pub reason: String,
-}
-
-#[tauri::command]
-pub fn engine_ready(app: AppHandle, state: State<'_, AppState>, payload: ReadyPayload) {
-    if payload.ok {
-        tracing::info!("engine ready and authorized");
-        state.engine_ready.store(true, Ordering::Relaxed);
-        state.login_prompted.store(false, Ordering::Relaxed);
-        let _ = engine::hide(&app);
-        let _ = app.emit("engine://ready", ());
-
-        let warm_with = {
-            let db = state.db.lock().expect("db mutex");
-            db.first_playable_catalog_id().unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "could not pick a prewarm track");
-                None
-            })
-        };
-        match warm_with {
-            Some(id) => {
-                tracing::info!(track = %id, "prewarming playback");
-                let _ = engine::send(&app, &EngineCommand::Prewarm { id });
-            }
-            None => tracing::debug!("no synced track to prewarm with"),
-        }
-        return;
-    }
-
-    if payload.reason != "unauthorized" && state.engine_ready.load(Ordering::Relaxed) {
-        tracing::debug!(reason = %payload.reason, "ignoring not-found after engine was ready");
-        return;
-    }
-
-    match payload.reason.as_str() {
-        "unauthorized" => {
-            if !state.login_prompted.swap(true, Ordering::Relaxed) {
-                tracing::info!("not signed in - opening Apple Music login");
-                let _ = engine::show_for_login(&app);
-            }
-        }
-        reason => {
-            tracing::error!(reason, "engine unavailable");
-            let _ = app.emit("engine://unavailable", reason.to_string());
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct TokensPayload {
-    pub dev: String,
-    pub user: String,
-    #[serde(default)]
-    pub storefront: String,
-}
-
-#[tauri::command]
-pub fn engine_tokens(app: AppHandle, state: State<'_, AppState>, payload: TokensPayload) {
-    let tokens = auth::Tokens {
-        developer_token: payload.dev,
-        music_user_token: payload.user,
-        storefront: payload.storefront,
-    };
-
-    if !tokens.is_complete() {
-        tracing::warn!("engine reported incomplete tokens; ignoring");
-        return;
-    }
-
-    if let Err(e) = auth::save(&tokens) {
-        tracing::warn!(error = %e, "could not persist tokens; continuing in-memory");
-    }
-
-    tracing::info!(storefront = %tokens.storefront, "tokens harvested");
-    *state.tokens.lock().expect("tokens mutex") = Some(tokens);
-    let _ = app.emit("auth://authenticated", ());
-
-    let handle = app.clone();
-    tauri::async_runtime::spawn(async move { sync::run(handle).await });
-}
-
-#[derive(Debug, Deserialize)]
-pub struct EventPayload {
-    pub kind: String,
-    #[serde(default)]
-    pub data: serde_json::Value,
-}
-
-#[tauri::command]
-pub fn engine_event(app: AppHandle, state: State<'_, AppState>, payload: EventPayload) {
-    if payload.kind == "unresolvable" {
-        let ids: Vec<String> = payload
-            .data
-            .get("ids")
-            .cloned()
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
-        if !ids.is_empty() {
-            let db = state.db.lock().expect("db mutex");
-            match db.mark_unresolvable(&ids) {
-                Ok(added) => {
-                    tracing::info!(added, reported = ids.len(), "recorded unresolvable catalog ids")
-                }
-                Err(e) => tracing::warn!(error = %e, "could not record unresolvable ids"),
-            }
-        }
-        return;
-    }
-
-    let follow_up = {
-        let mut p = state.player.lock().expect("player mutex");
-        match payload.kind.as_str() {
-            "playbackState" => {
-                let raw = payload.data.get("state").and_then(serde_json::Value::as_i64);
-                raw.map(|r| p.on_playback_state(r)).unwrap_or_default()
-            }
-            "position" => {
-                if let Some(ms) = payload.data.get("ms").and_then(serde_json::Value::as_u64) {
-                    p.on_position(ms);
-                }
-                Vec::new()
-            }
-            "nowPlaying" => {
-                if let Some(id) = payload.data.get("id").and_then(serde_json::Value::as_str) {
-                    let dur = payload
-                        .data
-                        .get("durationMs")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    p.on_now_playing(id, dur);
-                }
-                Vec::new()
-            }
-            "authorization" => {
-                let ok = payload
-                    .data
-                    .get("authorized")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false);
-                if !ok {
-                    tracing::warn!("engine lost authorization");
-                    let _ = app.emit("auth://lost", ());
-                }
-                Vec::new()
-            }
-            "recentTracks" => {
-                let tracks: Vec<Track> = payload
-                    .data
-                    .get("tracks")
-                    .cloned()
-                    .and_then(|v| serde_json::from_value(v).ok())
-                    .unwrap_or_default();
-                if tracks.is_empty() {
-                    tracing::warn!("engine returned no recent tracks");
-                    Vec::new()
-                } else {
-                    tracing::info!(count = tracks.len(), "loaded recent tracks");
-                    p.play_queue(tracks, 0)
-                }
-            }
-            "error" => {
-                tracing::warn!(data = %payload.data, "engine reported error");
-                Vec::new()
-            }
-            other => {
-                tracing::debug!(kind = other, "unhandled engine event");
-                Vec::new()
-            }
-        }
-    };
-
-    commit(&app, &state, follow_up);
-}
-
 fn db_err(e: crate::db::DbError) -> String {
     tracing::error!(error = %e, "library query failed");
     e.to_string()
+}
+
+/// Query the provider directly when no imports exist; otherwise use one merged
+/// projection per pair of database revisions, shared by every paginated view.
+pub(crate) fn with_library<T>(
+    app: &AppHandle,
+    state: &AppState,
+    query: impl FnOnce(&crate::db::Db) -> Result<T, crate::db::DbError>,
+) -> Result<T, String> {
+    let source = state.settings.lock().expect("settings mutex").source;
+    let platform = match source {
+        crate::settings::Source::Apple => "apple_music",
+        crate::settings::Source::Spotify => "spotify",
+        crate::settings::Source::Youtube => "youtube",
+        crate::settings::Source::Soundcloud => "soundcloud",
+        crate::settings::Source::Navidrome => "navidrome",
+        crate::settings::Source::Local => "local",
+    };
+    let provider = state.db.lock().expect("db mutex");
+    let Some(imports) = app.try_state::<crate::import::State>() else {
+        return query(&provider).map_err(db_err);
+    };
+    let imports = imports
+        .db
+        .lock()
+        .map_err(|_| "Import database unavailable.")?;
+    if !imports.has_imported_tracks().map_err(db_err)? {
+        return query(&provider).map_err(db_err);
+    }
+    let view = crate::db::LibraryView::cached(
+        &provider,
+        &imports,
+        platform,
+        state.db_generation.load(Ordering::SeqCst),
+    )
+    .map_err(db_err)?;
+    drop(imports);
+    drop(provider);
+    let view = view.lock().map_err(|_| "Library cache unavailable.")?;
+    query(&view.db).map_err(db_err)
+}
+
+pub(crate) fn library_artwork_template(
+    app: &AppHandle,
+    id: &str,
+) -> Result<Option<String>, String> {
+    with_library(app, &app.state::<AppState>(), |db| {
+        db.artwork_for(id).map(|art| art.map(|art| art.template))
+    })
 }
 
 #[tauri::command]
@@ -890,10 +831,52 @@ pub fn library_sync(app: AppHandle) {
 
 fn playable_id(source: crate::settings::Source, s: &SongRow) -> Option<String> {
     use crate::settings::Source;
+    if s.catalog_id.as_deref() == Some(s.id.as_str()) && uuid::Uuid::parse_str(&s.id).is_ok() {
+        return Some(s.id.clone());
+    }
     match source {
-        Source::Apple | Source::Spotify => s.catalog_id.clone(),
+        Source::Apple | Source::Spotify | Source::Soundcloud => None,
+        Source::Youtube => s.catalog_id.clone(),
         Source::Navidrome | Source::Local => Some(s.id.clone()),
     }
+}
+
+fn queue_selection(
+    source: crate::settings::Source,
+    songs: Vec<SongRow>,
+    start_index: usize,
+    dead: &HashSet<String>,
+) -> (Vec<Track>, usize) {
+    let mut selected = None;
+    let playable: Vec<Track> = songs
+        .into_iter()
+        .enumerate()
+        .filter_map(|(original_index, s)| {
+            let id = playable_id(source, &s)?;
+            if dead.contains(&id) {
+                return None;
+            }
+            Some((
+                original_index,
+                Track {
+                    id,
+                    title: s.name,
+                    artist: s.artist_name,
+                    album: s.album_name,
+                    duration_ms: s.duration_ms,
+                },
+            ))
+        })
+        .enumerate()
+        .map(|(playable_index, (original_index, track))| {
+            if selected.is_none() && original_index >= start_index {
+                selected = Some(playable_index);
+            }
+            track
+        })
+        .collect();
+    let start = selected.unwrap_or_else(|| playable.len().saturating_sub(1));
+    (playable, start)
 }
 
 fn enqueue(app: &AppHandle, songs: Vec<SongRow>, start_index: usize) -> bool {
@@ -911,33 +894,17 @@ fn enqueue(app: &AppHandle, songs: Vec<SongRow>, start_index: usize) -> bool {
             HashSet::new()
         });
 
-    let clicked = songs.get(start_index).and_then(|s| playable_id(source, s));
-
-    let playable: Vec<Track> = songs
-        .into_iter()
-        .filter_map(|s| {
-            let id = playable_id(source, &s)?;
-            if dead.contains(&id) {
-                return None;
-            }
-            Some(Track {
-                id,
-                title: s.name,
-                artist: s.artist_name,
-                album: s.album_name,
-                duration_ms: s.duration_ms,
-            })
-        })
-        .collect();
+    let (playable, start) = queue_selection(source, songs, start_index, &dead);
 
     if playable.is_empty() {
         return false;
     }
 
-    let start = clicked
-        .and_then(|id| playable.iter().position(|t| t.id == id))
-        .unwrap_or_else(|| start_index.min(playable.len() - 1));
-    let cmds = state.player.lock().expect("player mutex").play_queue(playable, start);
+    let cmds = state
+        .player
+        .lock()
+        .expect("player mutex")
+        .play_queue(playable, start);
     commit(app, &state, cmds);
     true
 }
@@ -949,51 +916,84 @@ pub fn play_songs(app: AppHandle, songs: Vec<SongRow>, start_index: Option<usize
     }
 }
 
-fn uses_apple_catalog(app: &AppHandle) -> bool {
-    let source = app.state::<AppState>().settings.lock().expect("settings mutex").source;
-    matches!(source, crate::settings::Source::Apple)
-}
-
 fn api_client(app: &AppHandle) -> Result<crate::api::Client, String> {
-    let tokens = { app.state::<AppState>().tokens.lock().expect("tokens mutex").clone() };
+    let tokens = {
+        app.state::<AppState>()
+            .tokens
+            .lock()
+            .expect("tokens mutex")
+            .clone()
+    };
     let tokens = tokens.filter(|t| t.is_complete()).ok_or("not signed in")?;
     crate::api::Client::new(tokens).map_err(|e| e.to_string())
 }
 
 async fn ensure_album_songs(app: &AppHandle, album_id: &str) -> Result<Vec<SongRow>, String> {
-    let cached = { app.state::<AppState>().db.lock().expect("db mutex").album_songs(album_id) };
+    if album_id.starts_with("import-album:") {
+        return with_library(app, &app.state::<AppState>(), |db| db.album_songs(album_id));
+    }
+    let cached = with_library(app, &app.state::<AppState>(), |db| db.album_songs(album_id));
     if let Ok(rows) = cached {
         if !rows.is_empty() {
             return Ok(rows);
         }
     }
 
-    if !uses_apple_catalog(app) {
-        return Err("no tracks for this album yet - try syncing your library".into());
-    }
-    let fetched = api_client(app)?.album_tracks(album_id).await.map_err(|e| e.to_string())?;
+    let state = app.state::<AppState>();
+    let source = state.settings.lock().expect("settings mutex").source;
+    let generation = state.db_generation.load(Ordering::SeqCst);
+    let fetched = match source {
+        crate::settings::Source::Apple => api_client(app)?
+            .album_tracks(album_id)
+            .await
+            .map_err(|e| e.to_string())?,
+        _ => return Err("no tracks for this album yet - try syncing your library".into()),
+    };
     if fetched.is_empty() {
         return Err("album has no tracks".into());
     }
     {
         let state = app.state::<AppState>();
         let mut db = state.db.lock().expect("db mutex");
+        if state.db_generation.load(Ordering::SeqCst) != generation {
+            return Err("Library changed while loading this album. Try again.".into());
+        }
         db.upsert_songs(&fetched).map_err(db_err)?;
     }
-    app.state::<AppState>().db.lock().expect("db mutex").album_songs(album_id).map_err(db_err)
+    app.state::<AppState>()
+        .db
+        .lock()
+        .expect("db mutex")
+        .album_songs(album_id)
+        .map_err(db_err)
 }
 
 async fn ensure_playlist_songs(app: &AppHandle, playlist_id: &str) -> Result<Vec<SongRow>, String> {
-    let cached = { app.state::<AppState>().db.lock().expect("db mutex").playlist_songs(playlist_id) };
+    if let Some(rows) = crate::import::jobs::playlist_songs(app, playlist_id)? {
+        return Ok(rows);
+    }
+    let cached = {
+        app.state::<AppState>()
+            .db
+            .lock()
+            .expect("db mutex")
+            .playlist_songs(playlist_id)
+    };
     if let Ok(rows) = cached {
         if !rows.is_empty() {
             return Ok(rows);
         }
     }
-    if !uses_apple_catalog(app) {
-        return Err("no tracks for this playlist yet - try syncing your library".into());
-    }
-    let fetched = api_client(app)?.playlist_tracks(playlist_id).await.map_err(|e| e.to_string())?;
+    let state = app.state::<AppState>();
+    let source = state.settings.lock().expect("settings mutex").source;
+    let generation = state.db_generation.load(Ordering::SeqCst);
+    let fetched = match source {
+        crate::settings::Source::Apple => api_client(app)?
+            .playlist_tracks(playlist_id)
+            .await
+            .map_err(|e| e.to_string())?,
+        _ => return Err("no tracks for this playlist yet - try syncing your library".into()),
+    };
     if fetched.is_empty() {
         return Err("playlist has no tracks".into());
     }
@@ -1001,10 +1001,18 @@ async fn ensure_playlist_songs(app: &AppHandle, playlist_id: &str) -> Result<Vec
     {
         let state = app.state::<AppState>();
         let mut db = state.db.lock().expect("db mutex");
+        if state.db_generation.load(Ordering::SeqCst) != generation {
+            return Err("Library changed while loading this playlist. Try again.".into());
+        }
         db.upsert_songs(&fetched).map_err(db_err)?;
         db.set_playlist_tracks(playlist_id, &ids).map_err(db_err)?;
     }
-    app.state::<AppState>().db.lock().expect("db mutex").playlist_songs(playlist_id).map_err(db_err)
+    app.state::<AppState>()
+        .db
+        .lock()
+        .expect("db mutex")
+        .playlist_songs(playlist_id)
+        .map_err(db_err)
 }
 
 #[tauri::command]
@@ -1026,9 +1034,11 @@ pub async fn play_playlist(app: AppHandle, playlist_id: String) -> Result<(), St
 }
 
 pub(crate) fn reconcile_backend(app: &AppHandle, source: crate::settings::Source) {
+    crate::import::playback::release(app);
     use crate::settings::Source;
     let state = app.state::<AppState>();
-    let webview_source = matches!(source, Source::Apple | Source::Spotify);
+
+    crate::youtube_native::stop(app);
 
     if let Some(engine) = state.audio.lock().expect("audio mutex").clone() {
         engine.stop();
@@ -1036,26 +1046,14 @@ pub(crate) fn reconcile_backend(app: &AppHandle, source: crate::settings::Source
     state.player.lock().expect("player mutex").reset_queue();
     *state.now_reported.lock().expect("now reported mutex") = NowReported::default();
     if let Some(presence) = state.discord.lock().expect("discord mutex").clone() {
-        std::thread::spawn(move || presence.clear());
+        let ticket = presence.begin_update();
+        std::thread::spawn(move || presence.clear_current(ticket));
     }
 
-    if webview_source {
-        if crate::engine::window(app).is_none() {
-            let visible = crate::config::Runtime::from_env().show_engine_window;
-            if let Err(e) = crate::engine::spawn(app, visible) {
-                tracing::error!(error = %e, "could not start the playback engine");
-            }
-        }
+    if source == Source::Youtube {
         *state.audio.lock().expect("audio mutex") = None;
         *state.navidrome.lock().expect("navidrome mutex") = None;
         return;
-    }
-
-    if let Some(w) = crate::engine::window(app) {
-        if let Err(e) = w.close() {
-            tracing::warn!(error = %e, "could not close the engine webview");
-        }
-        state.engine_ready.store(false, Ordering::Relaxed);
     }
 
     let settings = state.settings.lock().expect("settings mutex").clone();
@@ -1065,7 +1063,7 @@ pub(crate) fn reconcile_backend(app: &AppHandle, source: crate::settings::Source
 
     let has_engine = state.audio.lock().expect("audio mutex").is_some();
     if !has_engine {
-        match crate::audio::Engine::new() {
+        match crate::desktop::open_engine(app) {
             Ok(e) => {
                 *state.audio.lock().expect("audio mutex") = Some(std::sync::Arc::new(e));
             }
@@ -1083,9 +1081,11 @@ fn use_database_for(app: &AppHandle, source: crate::settings::Source) -> Result<
     let path = crate::db::default_db_path(dir, source).map_err(|e| e.to_string())?;
     let opened = crate::db::Db::open_at(&path).map_err(|e| e.to_string())?;
     tracing::info!(path = %path.display(), ?source, "switching library database");
-    *state.db.lock().expect("db mutex") = opened;
-
-    state.db_generation.fetch_add(1, Ordering::SeqCst);
+    {
+        let mut db = state.db.lock().expect("db mutex");
+        *db = opened;
+        state.db_generation.fetch_add(1, Ordering::SeqCst);
+    }
     Ok(())
 }
 
@@ -1101,8 +1101,8 @@ pub struct NavidromeStatus {
 #[tauri::command]
 pub fn navidrome_status(state: State<'_, AppState>) -> NavidromeStatus {
     let settings = state.settings.lock().expect("settings mutex").clone();
-    let has_password = crate::config::navidrome_env().is_some()
-        || auth::load_navidrome().ok().flatten().is_some();
+    let has_password =
+        crate::config::navidrome_env().is_some() || auth::load_navidrome().ok().flatten().is_some();
     NavidromeStatus {
         insecure: crate::subsonic::is_insecure(&settings.navidrome.url),
         configured: has_password
@@ -1182,7 +1182,11 @@ pub struct LastfmStatus {
 
 #[tauri::command]
 pub fn lastfm_status(state: State<'_, AppState>) -> LastfmStatus {
-    let configured = state.settings.lock().expect("settings mutex").lastfm_enabled();
+    let configured = state
+        .settings
+        .lock()
+        .expect("settings mutex")
+        .lastfm_enabled();
     let session = state.lastfm.lock().expect("lastfm mutex").clone();
     LastfmStatus {
         configured,
@@ -1208,8 +1212,9 @@ pub async fn lastfm_connect(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
 
     let url = crate::lastfm::authorize_url(&api_key, &token);
-    let parsed: url::Url =
-        url.parse().map_err(|_| "could not build the sign-in url".to_string())?;
+    let parsed: url::Url = url
+        .parse()
+        .map_err(|_| "could not build the sign-in url".to_string())?;
 
     let opener = app.clone();
     app.run_on_main_thread(move || {
@@ -1253,7 +1258,10 @@ pub async fn lastfm_connect(app: AppHandle) -> Result<(), String> {
             }
         }
         close_lastfm_window(&app);
-        let _ = app.emit("lastfm://failed", "timed out waiting for authorisation".to_string());
+        let _ = app.emit(
+            "lastfm://failed",
+            "timed out waiting for authorisation".to_string(),
+        );
     });
 
     Ok(())
@@ -1278,18 +1286,22 @@ pub fn dev_diagnostics(app: AppHandle) -> String {
     let has_audio = state.audio.lock().expect("audio mutex").is_some();
     let has_navidrome = state.navidrome.lock().expect("navidrome mutex").is_some();
     let has_discord = state.discord.lock().expect("discord mutex").is_some();
-    let engine_window = crate::engine::window(&app).is_some();
+
     let db_path = {
         let dir = state.data_dir.lock().expect("data dir mutex").clone();
         crate::db::default_db_path(dir, settings.source)
-            .map(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default())
+            .map(|p| {
+                p.file_name()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
             .unwrap_or_else(|_| "unknown".into())
     };
 
     format!(
         "capsule {}\n\
          source: {:?}   glass: {}\n\
-         backend: audio={} navidrome={} engine_webview={} discord={}\n\
+         backend: audio={} navidrome={} discord={}\n\
          database: {}\n\
          library: {} songs, {} albums, {} playlists, {} artists\n\
          player: {:?}  queue={} index={:?} position={}ms volume={} shuffle={} repeat={:?}\n\
@@ -1301,7 +1313,6 @@ pub fn dev_diagnostics(app: AppHandle) -> String {
         settings.appearance.glass,
         has_audio,
         has_navidrome,
-        engine_window,
         has_discord,
         db_path,
         counts.songs,
@@ -1325,14 +1336,6 @@ pub fn dev_diagnostics(app: AppHandle) -> String {
     )
 }
 
-#[tauri::command]
-pub fn dev_load_recent(app: AppHandle) -> Result<(), String> {
-    let Some(w) = engine::window(&app) else {
-        return Err("engine window not available".into());
-    };
-    w.eval("window.__saint && __saint.loadRecent()").map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1340,16 +1343,28 @@ mod tests {
 
     #[test]
     fn musickit_only_commands_are_no_ops_natively() {
-        assert_eq!(native_action(&EngineCommand::Prewarm { id: "x".into() }), NativeAction::Ignore);
-        assert_eq!(native_action(&EngineCommand::SetShuffle { on: true }), NativeAction::Ignore);
-        assert_eq!(native_action(&EngineCommand::SetRepeat { mode: 2 }), NativeAction::Ignore);
+        assert_eq!(
+            native_action(&EngineCommand::Prewarm { id: "x".into() }),
+            NativeAction::Ignore
+        );
+        assert_eq!(
+            native_action(&EngineCommand::SetShuffle { on: true }),
+            NativeAction::Ignore
+        );
+        assert_eq!(
+            native_action(&EngineCommand::SetRepeat { mode: 2 }),
+            NativeAction::Ignore
+        );
     }
 
     #[test]
     fn transport_commands_map_directly() {
         assert_eq!(native_action(&EngineCommand::Play), NativeAction::Play);
         assert_eq!(native_action(&EngineCommand::Pause), NativeAction::Pause);
-        assert_eq!(native_action(&EngineCommand::Seek { ms: 5000 }), NativeAction::Seek(5000));
+        assert_eq!(
+            native_action(&EngineCommand::Seek { ms: 5000 }),
+            NativeAction::Seek(5000)
+        );
         assert_eq!(
             native_action(&EngineCommand::SetVolume { percent: 40 }),
             NativeAction::Volume(40)
@@ -1373,16 +1388,41 @@ mod tests {
         use crate::settings::Source;
 
         let navidrome_track = row("tr-1", None);
-        assert_eq!(playable_id(Source::Navidrome, &navidrome_track).as_deref(), Some("tr-1"));
-        assert_eq!(playable_id(Source::Local, &navidrome_track).as_deref(), Some("tr-1"));
+        assert_eq!(
+            playable_id(Source::Navidrome, &navidrome_track).as_deref(),
+            Some("tr-1")
+        );
+        assert_eq!(
+            playable_id(Source::Local, &navidrome_track).as_deref(),
+            Some("tr-1")
+        );
     }
 
     #[test]
-    fn apple_queues_by_catalog_id_and_rejects_rows_without_one() {
+    fn canonical_tracks_route_by_id_for_every_active_source_and_keep_occurrences() {
+        use crate::settings::Source;
+        let id = "c584f4f4-628c-43c8-b619-27c2ee7523d3";
+        for source in [
+            Source::Local,
+            Source::Navidrome,
+            Source::Youtube,
+            Source::Soundcloud,
+            Source::Apple,
+            Source::Spotify,
+        ] {
+            assert_eq!(playable_id(source, &row(id, Some(id))).as_deref(), Some(id));
+            let songs = vec![row(id, Some(id)), row(id, Some(id))];
+            let (tracks, start) = queue_selection(source, songs, 1, &HashSet::new());
+            assert_eq!((tracks.len(), start), (2, 1));
+            assert_eq!(tracks[1].id, id);
+        }
+    }
+    #[test]
+    fn retired_apple_source_cannot_enqueue_tracks() {
         use crate::settings::Source;
         assert_eq!(
             playable_id(Source::Apple, &row("lib-1", Some("cat-1"))).as_deref(),
-            Some("cat-1")
+            None
         );
         assert_eq!(playable_id(Source::Apple, &row("lib-1", None)), None);
     }
@@ -1390,10 +1430,32 @@ mod tests {
     #[test]
     fn queue_and_skip_commands_load_the_current_index() {
         assert_eq!(
-            native_action(&EngineCommand::SetQueue { ids: vec!["a".into()], start_index: 0 }),
+            native_action(&EngineCommand::SetQueue {
+                ids: vec!["a".into()],
+                start_index: 0
+            }),
             NativeAction::LoadCurrent
         );
-        assert_eq!(native_action(&EngineCommand::SkipNext), NativeAction::LoadCurrent);
-        assert_eq!(native_action(&EngineCommand::SkipPrevious), NativeAction::LoadCurrent);
+        assert_eq!(
+            native_action(&EngineCommand::SkipNext),
+            NativeAction::LoadCurrent
+        );
+        assert_eq!(
+            native_action(&EngineCommand::SkipPrevious),
+            NativeAction::LoadCurrent
+        );
+    }
+
+    #[test]
+    fn queue_selection_keeps_clicked_duplicate_occurrence_after_filtering() {
+        use crate::settings::Source;
+        let songs = vec![
+            row("missing", None),
+            row("first", Some("same")),
+            row("second", Some("same")),
+        ];
+        let (tracks, start) = queue_selection(Source::Youtube, songs, 2, &HashSet::new());
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(start, 1);
     }
 }

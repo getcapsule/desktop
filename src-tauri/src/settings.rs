@@ -1,18 +1,3 @@
-//! User settings, in a TOML file the user can edit by hand.
-//!
-//! Distinct from [`crate::config`], which holds compile-time keys and debug
-//! toggles. Anything a user should be able to change without a rebuild lives
-//! here: which source they play from, where their music is, how their machine
-//! is calibrated.
-//!
-//! Two rules, both inherited from `config`:
-//!
-//! * **Never panic.** A malformed file falls back to defaults with a warning.
-//!   Losing settings is annoying; refusing to start is unusable.
-//! * **Secrets do not live here.** Passwords, session keys and Apple tokens go
-//!   to the credential store via [`crate::auth`]. This file sits in plaintext
-//!   next to the library and should survive being pasted into a bug report.
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -22,10 +7,16 @@ pub const FILE: &str = "config.toml";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
-    #[default]
+    // Only retained to address legacy cache files, never an active playback source.
+    #[serde(skip_deserializing)]
     Apple,
+    #[serde(skip_deserializing)]
     Spotify,
+    Youtube,
+    Soundcloud,
     Navidrome,
+    #[default]
+    #[serde(other)]
     Local,
 }
 
@@ -34,6 +25,12 @@ pub enum Source {
 pub struct Navidrome {
     pub url: String,
     pub username: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Spotify {
+    pub client_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -81,7 +78,10 @@ pub struct Appearance {
 
 impl Default for Appearance {
     fn default() -> Self {
-        Self { glass: "none".into(), theme: crate::theme::DEFAULT_THEME_ID.into() }
+        Self {
+            glass: "none".into(),
+            theme: crate::theme::DEFAULT_THEME_ID.into(),
+        }
     }
 }
 
@@ -97,6 +97,7 @@ pub struct Settings {
     pub developer: bool,
     pub appearance: Appearance,
     pub navidrome: Navidrome,
+    pub spotify: Spotify,
     pub local: Local,
     pub lyrics: LyricsSettings,
     pub lastfm: Lastfm,
@@ -117,11 +118,17 @@ impl Settings {
     }
 
     pub fn shared_secret(&self) -> &str {
-        pick(&self.lastfm.shared_secret, crate::config::Keys::LASTFM_SHARED_SECRET)
+        pick(
+            &self.lastfm.shared_secret,
+            crate::config::Keys::LASTFM_SHARED_SECRET,
+        )
     }
 
     pub fn discord_client_id(&self) -> &str {
-        pick(&self.discord.client_id, crate::config::Keys::DISCORD_CLIENT_ID)
+        pick(
+            &self.discord.client_id,
+            crate::config::Keys::DISCORD_CLIENT_ID,
+        )
     }
 }
 
@@ -167,8 +174,20 @@ pub fn save(dir: &Path, settings: &Settings) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn soundcloud_source_round_trips_without_credentials() {
+        let settings = Settings {
+            source: Source::Soundcloud,
+            ..Settings::default()
+        };
+        let serialized = toml::to_string(&settings).unwrap();
+        assert!(serialized.contains("source = \"soundcloud\""));
+        assert_eq!(toml::from_str::<Settings>(&serialized).unwrap(), settings);
+    }
+
     fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("capsule-settings-{name}-{}", std::process::id()));
+        let d =
+            std::env::temp_dir().join(format!("capsule-settings-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -178,7 +197,7 @@ mod tests {
     fn a_missing_file_yields_defaults() {
         let dir = tmp("missing");
         let s = load(&dir);
-        assert_eq!(s.source, Source::Apple);
+        assert_eq!(s.source, Source::Local);
         assert!(!s.onboarded);
         assert_eq!(s.lyrics.offset_ms, 0);
     }
@@ -192,7 +211,9 @@ mod tests {
                 url: "https://music.example.com".into(),
                 username: "deniz".into(),
             },
-            local: Local { folders: vec![PathBuf::from("D:/Music")] },
+            local: Local {
+                folders: vec![PathBuf::from("D:/Music")],
+            },
             lyrics: LyricsSettings { offset_ms: -180 },
             ..Settings::default()
         };
@@ -229,9 +250,28 @@ mod tests {
     }
 
     #[test]
+    fn retired_apple_and_unknown_sources_preserve_other_settings() {
+        for source in ["apple", "spotify", "tidal"] {
+            let dir = tmp(&format!("retired-{source}"));
+            let raw = format!("source = \"{source}\"\nonboarded = true\ndeveloper = true\n[lyrics]\noffset_ms = 155\n[appearance]\nglass = \"none\"\ntheme = \"my-theme\"\n");
+            std::fs::write(path(&dir), &raw).unwrap();
+            let loaded = load(&dir);
+            assert_eq!(loaded.source, Source::Local);
+            assert!(loaded.onboarded);
+            assert!(loaded.developer);
+            assert_eq!(loaded.lyrics.offset_ms, 155);
+            assert_eq!(loaded.appearance.theme, "my-theme");
+            assert_eq!(std::fs::read_to_string(path(&dir)).unwrap(), raw);
+        }
+    }
+
+    #[test]
     fn the_file_overrides_a_baked_in_key() {
         let s = Settings {
-            lastfm: Lastfm { api_key: "from-file".into(), ..Lastfm::default() },
+            lastfm: Lastfm {
+                api_key: "from-file".into(),
+                ..Lastfm::default()
+            },
             ..Settings::default()
         };
         assert_eq!(s.api_key(), "from-file");
@@ -240,13 +280,22 @@ mod tests {
     #[test]
     fn lastfm_needs_both_halves_of_a_registration() {
         let key_only = Settings {
-            lastfm: Lastfm { api_key: "key".into(), ..Lastfm::default() },
+            lastfm: Lastfm {
+                api_key: "key".into(),
+                ..Lastfm::default()
+            },
             ..Settings::default()
         };
-        assert!(!key_only.lastfm_enabled(), "an api key alone cannot sign calls");
+        assert!(
+            !key_only.lastfm_enabled(),
+            "an api key alone cannot sign calls"
+        );
 
         let both = Settings {
-            lastfm: Lastfm { api_key: "key".into(), shared_secret: "secret".into() },
+            lastfm: Lastfm {
+                api_key: "key".into(),
+                shared_secret: "secret".into(),
+            },
             ..Settings::default()
         };
         assert!(both.lastfm_enabled());
@@ -268,7 +317,10 @@ mod tests {
     fn theme_round_trips_through_disk() {
         let dir = tmp("theme-roundtrip");
         let s = Settings {
-            appearance: Appearance { glass: "mica".into(), theme: "paper".into() },
+            appearance: Appearance {
+                glass: "mica".into(),
+                theme: "paper".into(),
+            },
             ..Settings::default()
         };
         save(&dir, &s).unwrap();
@@ -278,9 +330,25 @@ mod tests {
     #[test]
     fn whitespace_is_not_a_key() {
         let s = Settings {
-            discord: Discord { client_id: "   ".into(), ..Discord::default() },
+            discord: Discord {
+                client_id: "   ".into(),
+                ..Discord::default()
+            },
             ..Settings::default()
         };
         assert!(!s.discord_enabled());
+    }
+
+    #[test]
+    fn youtube_source_and_spotify_client_configuration_round_trip() {
+        let settings: Settings =
+            toml::from_str("source = \"youtube\"\n[spotify]\nclient_id = \"public-client-id\"\n")
+                .unwrap();
+        assert_eq!(settings.source, Source::Youtube);
+        assert_eq!(settings.spotify.client_id, "public-client-id");
+        assert_eq!(
+            toml::from_str::<Settings>(&toml::to_string(&settings).unwrap()).unwrap(),
+            settings
+        );
     }
 }

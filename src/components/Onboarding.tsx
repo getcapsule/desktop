@@ -1,15 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { YoutubeSetup } from './YoutubeSetup'
 
 import {
-  auth,
   library,
   on,
   settings,
-  type AuthStatus,
   type Settings,
   type SyncProgress,
 } from '../lib/ipc'
-import { credentialStore } from '../lib/platform'
 import { Field, Folders, NavidromeFields, SOURCES, useNavidromeConnect } from './fields'
 import { WindowControls } from './WindowControls'
 
@@ -20,27 +18,29 @@ const FLOW: Step[] = ['welcome', 'source', 'setup', 'sync', 'lastfm', 'discord',
 export function Onboarding({ onFinished }: { onFinished: () => void }) {
   const [step, setStep] = useState<Step>('welcome')
   const [draft, setDraft] = useState<Settings | null>(null)
-  const [authed, setAuthed] = useState<AuthStatus | null>(null)
   const [progress, setProgress] = useState<SyncProgress | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
-  const [hasLibrary, setHasLibrary] = useState(false)
+  const sourceRef = useRef<Settings['source']>('local')
+  const stepRef = useRef(step)
+  stepRef.current = step
+  sourceRef.current = draft?.source ?? 'local'
   const nd = useNavidromeConnect()
   const { password, setPassword, busy: connecting, error: connectError } = nd
 
   useEffect(() => {
-    void settings.get().then(setDraft)
-    void auth.status().then(setAuthed)
-    void library.counts().then((c) => setHasLibrary(c.songs > 0))
+    void settings.get().then((saved) => {
+      setDraft(saved)
+      sourceRef.current = saved.source
+    })
 
     const subs = [
-      on('auth://authenticated', () => {
-        setProblem(null)
-        void auth.status().then(setAuthed)
-        setStep('sync')
-        void library.sync()
+      on('library://progress', (next) => {
+        setProgress(next)
+        if (next.done && stepRef.current === 'sync') setStep('lastfm')
       }),
-      on('library://progress', setProgress),
-      on('library://updated', () => setStep('lastfm')),
+      on('library://updated', () => {
+        if (sourceRef.current !== 'youtube') setStep('lastfm')
+      }),
       on('library://failed', (f) =>
         setProblem(f.needsAuth ? 'Session expired - sign in again.' : `Sync failed: ${f.reason}`),
       ),
@@ -51,6 +51,11 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
   }, [])
 
   const edit = (patch: Partial<Settings>) => setDraft((d) => (d ? { ...d, ...patch } : d))
+  const startSync = () => {
+    setProblem(null)
+    setStep('sync')
+    void library.sync().catch((reason) => setProblem(String(reason)))
+  }
   const save = (extra: Partial<Settings> = {}) => {
     if (draft) void settings.set({ ...draft, ...extra })
   }
@@ -60,7 +65,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
     onFinished()
   }
 
-  const source = draft?.source ?? 'apple'
+  const source = draft?.source ?? 'local'
   const chosen = SOURCES.find((s) => s.id === source)
 
   /// The connect command pings before it stores anything, so a bad password
@@ -76,23 +81,22 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
     setStep('sync')
   }
 
-  const afterSetup = () => {
-    save()
-    if (source === 'apple') {
-      if (hasLibrary) setStep('lastfm')
-      else if (authed?.authenticated) {
+  const afterSetup = async () => {
+    if (!draft) return
+    setProblem(null)
+    try {
+      await settings.set(draft)
+      if (source === 'navidrome') {
+        await connectNavidrome()
+      } else if (source === 'local') {
         setStep('sync')
-        void library.sync()
-      } else void auth.showLogin()
-    } else if (source === 'navidrome') {
-      void connectNavidrome()
-    } else if (source === 'local') {
-      // Nothing to sign in to: the folders are the source, so scan them now.
-      setStep('sync')
-      void library.sync()
-    } else {
-      // Spotify has no client yet; keep the settings for later.
-      setStep('lastfm')
+        await library.sync()
+      } else {
+        // Public YouTube playback has no private account library to sync.
+        setStep('lastfm')
+      }
+    } catch (reason) {
+      setProblem(String(reason))
     }
   }
 
@@ -122,7 +126,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
         <div className="w-[560px] max-w-[92vw]">
           <Dots step={step} />
 
-          <div className="rounded-lg border border-rule px-8 py-9 shadow-2xl backdrop-blur-2xl [background:color-mix(in_srgb,var(--color-panel)_78%,transparent)]">
+          <div className="glass-dialog px-8 py-9">
             {step === 'welcome' && (
               <Panel
                 title="capsule"
@@ -134,7 +138,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
 
             {step === 'source' && (
               <>
-                <Head title="Where does your music live?" sub="One at a time. You can change this later in config.toml." />
+                <Head title="Where does your music live?" sub="Choose a playback source. You can change it later in Settings." />
                 <div className="mt-5 grid grid-cols-2 gap-2">
                   {SOURCES.map((s) => (
                     <button
@@ -148,7 +152,6 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                     >
                       <span className="flex items-center gap-2 text-[13px] text-ink">
                         {s.name}
-                        {!s.ready && <span className="label text-[8px]">soon</span>}
                       </span>
                       <span className="mt-0.5 block text-[11px] text-muted">{s.blurb}</span>
                     </button>
@@ -162,20 +165,8 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
               <>
                 <Head
                   title={`Set up ${chosen?.name ?? 'your source'}`}
-                  sub={
-                    chosen?.ready
-                      ? undefined
-                      : 'This source is not playable yet - your settings are saved for when it lands.'
-                  }
                 />
 
-                {(source === 'apple' || source === 'spotify') && (
-                  <p className="mt-4 text-[13px] leading-6 text-muted">
-                    Sign-in happens on the service&apos;s own login page, in a window that opens
-                    next. capsule never sees your password - only the tokens the page hands back,
-                    stored in {credentialStore()}.
-                  </p>
-                )}
 
                 {source === 'navidrome' && (
                   <div className="mt-4">
@@ -198,6 +189,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                   />
                 )}
 
+                {source === 'youtube' && <div className="mt-4"><YoutubeSetup /></div>}
                 <Next
                   onClick={afterSetup}
                   disabled={
@@ -207,9 +199,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
                       draft.navidrome.username.trim() === '')
                   }
                   label={
-                    source === 'apple' && !authed?.authenticated && !hasLibrary
-                      ? 'Open sign-in'
-                      : source === 'navidrome'
+                    source === 'navidrome'
                         ? connecting
                           ? 'Connecting…'
                           : 'Connect'
@@ -295,7 +285,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
           </div>
 
           {(problem ?? connectError) && (
-            <p className="mt-4 text-center text-xs text-crit">{problem ?? connectError}</p>
+            <div className="mt-4 text-center text-xs text-crit"><p role="alert">{problem ?? connectError}</p>{step === 'sync' && <Next label="Retry sync" onClick={startSync} />}</div>
           )}
 
           {step !== 'done' && (

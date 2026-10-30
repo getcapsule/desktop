@@ -74,11 +74,6 @@ export interface PlayerState {
   repeat: Repeat
 }
 
-export interface AuthStatus {
-  authenticated: boolean
-  storefront: string | null
-}
-
 export const player = {
   snapshot: () => invoke<PlayerState>('player_snapshot'),
   play: () => invoke<void>('player_play'),
@@ -179,10 +174,10 @@ export interface AlbumQuery {
 }
 
 export interface LibraryCounts {
-  songs: number
-  albums: number
-  playlists: number
-  artists: number
+  songs: number,
+  albums: number,
+  playlists: number,
+  artists: number,
 }
 
 export interface SyncProgress {
@@ -222,7 +217,6 @@ export function artworkUrl(id: string, size = 96, revision?: number): string {
 }
 
 export const dev = {
-  loadRecent: () => invoke<void>('dev_load_recent'),
   diagnostics: () => invoke<string>('dev_diagnostics'),
 }
 

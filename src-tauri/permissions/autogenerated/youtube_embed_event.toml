@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-youtube-embed-event"
+description = "Enables the youtube_embed_event command without any pre-configured scope."
+commands.allow = ["youtube_embed_event"]
+
+[[permission]]
+identifier = "deny-youtube-embed-event"
+description = "Denies the youtube_embed_event command without any pre-configured scope."
+commands.deny = ["youtube_embed_event"]

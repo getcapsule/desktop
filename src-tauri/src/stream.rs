@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -50,7 +50,8 @@ impl CacheState {
     }
 }
 
-pub type Shared = Arc<(Mutex<CacheState>, Condvar)>;
+type CachePair = (Mutex<CacheState>, Condvar);
+pub type Shared = Arc<CachePair>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
@@ -104,7 +105,9 @@ pub fn cache_path(dir: &Path, key: &str) -> PathBuf {
 }
 
 pub fn prune(dir: &Path, cap_bytes: u64, keep: Option<&Path>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = entries
         .filter_map(|e| e.ok())
         .filter_map(|e| {
@@ -150,15 +153,61 @@ fn mark_complete(path: &Path, len: u64) {
     }
 }
 
+#[derive(Default)]
+struct CancelRoot {
+    stopped: AtomicBool,
+    wake: Mutex<Option<Weak<CachePair>>>,
+    write: Mutex<()>,
+}
 #[derive(Clone, Default)]
-pub struct Cancel(Arc<AtomicBool>);
+pub struct Cancel {
+    root: Arc<CancelRoot>,
+    local: Arc<AtomicBool>,
+}
 
 impl Cancel {
     pub fn stop(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        {
+            let _write = self.root.write.lock().expect("stream write");
+            self.root.stopped.store(true, Ordering::SeqCst);
+        }
+        if let Some(shared) = self
+            .root
+            .wake
+            .lock()
+            .expect("stream cancellation")
+            .as_ref()
+            .and_then(Weak::upgrade)
+        {
+            let mut state = shared.0.lock().expect("cache state mutex");
+            if !state.is_complete() {
+                state.fail("Playback superseded.".into());
+            }
+            shared.1.notify_all();
+        }
     }
-    fn stopped(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+    pub(crate) fn stopped(&self) -> bool {
+        self.root.stopped.load(Ordering::SeqCst) || self.local.load(Ordering::SeqCst)
+    }
+    pub(crate) fn write_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.root.write.lock().expect("stream write")
+    }
+    fn stop_fetch(&self) {
+        let _write = self.root.write.lock().expect("stream write");
+        self.local.store(true, Ordering::SeqCst);
+    }
+    fn next_fetch(&self) -> Self {
+        self.stop_fetch();
+        Self {
+            root: self.root.clone(),
+            local: Arc::default(),
+        }
+    }
+    fn watch(&self, shared: &Shared) {
+        *self.root.wake.lock().expect("stream cancellation") = Some(Arc::downgrade(shared));
+        if self.root.stopped.load(Ordering::SeqCst) {
+            self.stop();
+        }
     }
 }
 
@@ -186,94 +235,222 @@ pub fn spawn_fetch(
     }
 
     File::create(&path)?;
+    cancel.watch(&shared);
 
     tauri::async_runtime::spawn(async move {
-        use std::io::Write;
-
-        let finish_err = |shared: &Shared, msg: String| {
-            shared.0.lock().expect("cache state mutex").fail(msg);
-            shared.1.notify_all();
-        };
-
-        let client = match reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .read_timeout(std::time::Duration::from_secs(30))
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return finish_err(&shared, "could not start the transfer".into()),
-        };
-        let mut req = client.get(&url);
-        if from > 0 {
-            req = req.header(reqwest::header::RANGE, format!("bytes={from}-"));
-        }
-
-        let resp = match req.send().await {
-            Ok(r) => r,
-            Err(_) => return finish_err(&shared, "server unreachable".into()),
-        };
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED
-            || resp.status() == reqwest::StatusCode::FORBIDDEN
-        {
-            return finish_err(&shared, "server rejected the login".into());
-        }
-        if !resp.status().is_success() {
-            return finish_err(&shared, format!("server returned {}", resp.status()));
-        }
-
-        {
-            let mut g = shared.0.lock().expect("cache state mutex");
-            g.set_total(resp.content_length());
-        }
-        shared.1.notify_all();
-
-        let mut file = match std::fs::OpenOptions::new().write(true).open(&path) {
-            Ok(f) => f,
-            Err(e) => return finish_err(&shared, format!("cache write: {e}")),
-        };
-
-        let mut resp = resp;
-        loop {
-            match resp.chunk().await {
-                Ok(Some(bytes)) => {
-                    if cancel.stopped() {
-                        tracing::debug!("transfer superseded; stopping");
-                        return;
-                    }
-                    if let Err(e) = file.write_all(&bytes) {
-                        return finish_err(&shared, format!("cache write: {e}"));
-                    }
-                    {
-                        let mut g = shared.0.lock().expect("cache state mutex");
-                        g.note_written(bytes.len() as u64);
-                    }
-                    shared.1.notify_all();
+        if crate::soundcloud::hls::is_manifest_url(&url) {
+            let result = crate::soundcloud::hls::download(&url, &path, &shared, &cancel).await;
+            if let Err(message) = result {
+                shared.0.lock().expect("cache state mutex").fail(message);
+                shared.1.notify_all();
+            } else if !cancel.stopped() {
+                let state = shared.0.lock().expect("cache state mutex");
+                if state.is_complete() {
+                    mark_complete(&path, state.available());
                 }
-                Ok(None) => break,
-                Err(_) => return finish_err(&shared, "connection lost".into()),
             }
+            return;
         }
-
-        let landed = {
-            let mut g = shared.0.lock().expect("cache state mutex");
-            if g.total().is_none() {
-                let n = g.available();
-                g.set_total(Some(n));
+        let bounded = crate::youtube_native::resolver::valid_media_url(&url);
+        let result = match if crate::soundcloud::validate_audio_url(&url).is_ok() {
+            soundcloud_http_client()
+        } else {
+            http_client(bounded)
+        } {
+            Ok(client) => {
+                transfer(
+                    client,
+                    &url,
+                    &path,
+                    &shared,
+                    from,
+                    &cancel,
+                    bounded.then_some(1024 * 1024),
+                )
+                .await
             }
-            g.available()
+            Err(()) => Err("could not start the transfer".into()),
         };
-        shared.1.notify_all();
-
-        if from == 0 && !cancel.stopped() {
-            mark_complete(&path, landed);
+        if let Err(message) = result {
+            if cancel.stopped() {
+                return;
+            }
+            shared.0.lock().expect("cache state mutex").fail(message);
+            shared.1.notify_all();
+        } else if from == 0 && !cancel.stopped() {
+            let state = shared.0.lock().expect("cache state mutex");
+            if state.is_complete() {
+                mark_complete(&path, state.available());
+            }
         }
     });
     Ok(())
 }
 
+fn soundcloud_http_client() -> Result<&'static reqwest::Client, ()> {
+    static CLIENT: OnceLock<Result<reqwest::Client, ()>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .read_timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if attempt.previous().len() < 5
+                        && crate::soundcloud::validate_audio_url(attempt.url().as_str()).is_ok()
+                    {
+                        attempt.follow()
+                    } else {
+                        attempt.stop()
+                    }
+                }))
+                .build()
+                .map_err(|_| ())
+        })
+        .as_ref()
+        .map_err(|_| ())
+}
+
+fn http_client(google_media: bool) -> Result<&'static reqwest::Client, ()> {
+    static STANDARD: OnceLock<Result<reqwest::Client, ()>> = OnceLock::new();
+    static GOOGLE: OnceLock<Result<reqwest::Client, ()>> = OnceLock::new();
+    let slot = if google_media { &GOOGLE } else { &STANDARD };
+    slot.get_or_init(|| {
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(30));
+        if google_media {
+            builder = builder.redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() < 5
+                    && crate::youtube_native::resolver::valid_media_url(attempt.url().as_str())
+                {
+                    attempt.follow()
+                } else {
+                    attempt.stop()
+                }
+            }));
+        }
+        builder.build().map_err(|_| ())
+    })
+    .as_ref()
+    .map_err(|_| ())
+}
+
+fn content_range(raw: &str, expected_start: u64) -> Option<(u64, u64)> {
+    let (range, total) = raw.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let (start, end, total): (u64, u64, u64) =
+        (start.parse().ok()?, end.parse().ok()?, total.parse().ok()?);
+    (start == expected_start && end >= start && total > end).then_some((end, total))
+}
+
+async fn transfer(
+    client: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    shared: &Shared,
+    from: u64,
+    cancel: &Cancel,
+    chunk_size: Option<u64>,
+) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|_| "Could not open the audio buffer.")?;
+    let mut offset = from;
+    loop {
+        if cancel.stopped() {
+            return Ok(());
+        }
+        let mut request = client.get(url);
+        if let Some(size) = chunk_size {
+            request = request.header(
+                reqwest::header::RANGE,
+                format!("bytes={offset}-{}", offset.saturating_add(size - 1)),
+            );
+        } else if offset > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        }
+        let mut response = request.send().await.map_err(|_| "server unreachable")?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED
+            || response.status() == reqwest::StatusCode::FORBIDDEN
+        {
+            return Err(if chunk_size.is_some() {
+                "YouTube denied this audio stream. Retry the recording or choose another source."
+            } else {
+                "server rejected the login"
+            }
+            .into());
+        }
+        if !response.status().is_success() {
+            return Err(format!("server returned {}", response.status()));
+        }
+        let range = if chunk_size.is_some() || offset > 0 {
+            if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+                return Err("The media server ignored the requested byte range.".into());
+            }
+            let raw = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .ok_or("Missing media byte range.")?;
+            Some(content_range(raw, offset).ok_or("Invalid media byte range.")?)
+        } else {
+            None
+        };
+        let expected = range
+            .map(|(end, _)| end + 1 - offset)
+            .or(response.content_length());
+        let total = range
+            .map(|(_, total)| total - from)
+            .or(response.content_length());
+        shared.0.lock().expect("cache state mutex").set_total(total);
+        shared.1.notify_all();
+        let mut received = 0u64;
+        while let Some(bytes) = response.chunk().await.map_err(|_| "connection lost")? {
+            if cancel.stopped() {
+                return Ok(());
+            }
+            received += bytes.len() as u64;
+            if expected.is_some_and(|expected| received > expected) {
+                return Err("The media server returned an invalid range length.".into());
+            }
+            let _write = cancel.root.write.lock().expect("stream write");
+            if cancel.stopped() {
+                return Ok(());
+            }
+            file.write_all(&bytes)
+                .map_err(|_| "Could not write the audio buffer.")?;
+            shared
+                .0
+                .lock()
+                .expect("cache state mutex")
+                .note_written(bytes.len() as u64);
+            shared.1.notify_all();
+        }
+        if expected.is_some_and(|expected| received != expected) {
+            return Err("The audio transfer ended early.".into());
+        }
+        if let Some((end, total)) = range {
+            offset = end + 1;
+            if chunk_size.is_some() && offset < total {
+                continue;
+            }
+        }
+        let mut state = shared.0.lock().expect("cache state mutex");
+        if state.total().is_none() {
+            let available = state.available();
+            state.set_total(Some(available));
+        }
+        shared.1.notify_all();
+        return Ok(());
+    }
+}
+
 pub struct StreamingSource {
     file: File,
     shared: Shared,
+    observer: Shared,
     path: PathBuf,
     url: String,
     base: u64,
@@ -292,6 +469,7 @@ impl StreamingSource {
     ) -> std::io::Result<Self> {
         Ok(Self {
             file: File::open(&path)?,
+            observer: shared.clone(),
             shared,
             path,
             url,
@@ -314,19 +492,30 @@ impl StreamingSource {
     fn known_total(&mut self) -> Option<u64> {
         if self.total.is_none() {
             let base = self.base;
-            self.total = self.shared.0.lock().expect("cache state mutex").total().map(|t| base + t);
+            self.total = self
+                .shared
+                .0
+                .lock()
+                .expect("cache state mutex")
+                .total()
+                .map(|t| base + t);
         }
         self.total
     }
 
     fn refetch(&mut self, from: u64) -> std::io::Result<()> {
         tracing::debug!(from, "seek outside the buffer; refetching");
-        self.cancel.stop();
         let total = self.known_total();
         let shared: Shared = Arc::new((Mutex::new(CacheState::new()), Condvar::new()));
         let _ = std::fs::remove_file(self.path.with_extension("done"));
-        let cancel = Cancel::default();
-        spawn_fetch(self.url.clone(), self.path.clone(), shared.clone(), from, cancel.clone())?;
+        let cancel = self.cancel.next_fetch();
+        spawn_fetch(
+            self.url.clone(),
+            self.path.clone(),
+            shared.clone(),
+            from,
+            cancel.clone(),
+        )?;
         self.cancel = cancel;
         self.file = File::open(&self.path)?;
         self.shared = shared;
@@ -341,8 +530,16 @@ impl Read for StreamingSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let local_pos = self.pos.saturating_sub(self.base);
         let want = local_pos + buf.len() as u64;
-        let available = wait_for(&self.shared, want, READ_TIMEOUT)
-            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let available = wait_for(&self.shared, want, READ_TIMEOUT).map_err(|e| {
+            let message = e.to_string();
+            self.observer
+                .0
+                .lock()
+                .expect("cache state mutex")
+                .fail(message.clone());
+            self.observer.1.notify_all();
+            std::io::Error::other(message)
+        })?;
 
         if available <= local_pos {
             return Ok(0); // EOF
@@ -352,6 +549,12 @@ impl Read for StreamingSource {
         let n = self.file.read(&mut buf[..can])?;
         self.pos += n as u64;
         Ok(n)
+    }
+}
+
+impl Drop for StreamingSource {
+    fn drop(&mut self) {
+        self.cancel.stop_fetch();
     }
 }
 
@@ -374,7 +577,7 @@ impl Seek for StreamingSource {
 
         if target < self.base || target > self.absolute_available() {
             let past_end = total.is_some_and(|t| target >= t);
-            if !past_end {
+            if !past_end && !crate::soundcloud::hls::is_manifest_url(&self.url) {
                 self.refetch(target)?;
             }
         }
@@ -411,6 +614,117 @@ mod tests {
     }
 
     #[test]
+    fn validates_content_ranges_before_advancing_the_stream() {
+        assert_eq!(content_range("bytes 4-7/10", 4), Some((7, 10)));
+        for raw in [
+            "bytes 5-7/10",
+            "bytes 4-11/10",
+            "bytes 7-4/10",
+            "bytes 4-7/*",
+            "garbage",
+        ] {
+            assert_eq!(content_range(raw, 4), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn dropping_a_stream_cancels_its_latest_transfer() {
+        let cancel = Cancel::default();
+        let src = StreamingSource::new(
+            temp_file("cancel-on-drop.dat", b""),
+            shared(),
+            String::new(),
+            cancel.clone(),
+        )
+        .unwrap();
+        drop(src);
+        assert!(cancel.stopped());
+    }
+
+    #[test]
+    fn engine_cancellation_reaches_seek_refetch_and_wakes_its_reader() {
+        let parent = Cancel::default();
+        let child = parent.next_fetch();
+        let pending = shared();
+        child.watch(&pending);
+        let waiting = pending.clone();
+        let reader = std::thread::spawn(move || wait_for(&waiting, 1, Duration::from_secs(2)));
+        parent.stop();
+        assert!(child.stopped());
+        assert!(matches!(reader.join().unwrap(), Err(StreamError::Fetch(_))));
+    }
+
+    #[test]
+    fn stop_finishes_an_in_flight_write_before_the_cache_path_is_reused() {
+        let cancel = Cancel::default();
+        let write = cancel.root.write.lock().unwrap();
+        let (done, observed) = std::sync::mpsc::channel();
+        let stop = cancel.clone();
+        let worker = std::thread::spawn(move || {
+            stop.stop();
+            done.send(()).unwrap();
+        });
+        assert!(
+            observed.recv_timeout(Duration::from_millis(50)).is_err(),
+            "stop must wait until the old cache write finishes"
+        );
+        drop(write);
+        observed.recv_timeout(Duration::from_secs(1)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_ranges_append_until_the_real_end_and_support_seek_offsets() {
+        for from in [0, 4] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/audio", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                for start in (from..10).step_by(4) {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        let mut byte = [0];
+                        socket.read_exact(&mut byte).unwrap();
+                        request.push(byte[0]);
+                    }
+                    let end = (start + 3).min(9);
+                    assert!(String::from_utf8_lossy(&request)
+                        .to_ascii_lowercase()
+                        .contains(&format!("range: bytes={start}-{}", start + 3)));
+                    let body = &b"0123456789"[start as usize..=end as usize];
+                    write!(socket, "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{end}/10\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+                    socket.write_all(body).unwrap();
+                }
+            });
+            let path = temp_file(&format!("ranges-{from}.dat"), b"");
+            let shared = shared();
+            let client = reqwest::Client::new();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                transfer(
+                    &client,
+                    &url,
+                    &path,
+                    &shared,
+                    from,
+                    &Cancel::default(),
+                    Some(4),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            server.join().unwrap();
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                &b"0123456789"[from as usize..]
+            );
+            assert_eq!(shared.0.lock().unwrap().total(), Some(10 - from));
+            assert!(shared.0.lock().unwrap().is_complete());
+        }
+    }
+
+    #[test]
     fn written_bytes_accumulate() {
         let mut s = CacheState::new();
         s.note_written(1024);
@@ -441,7 +755,11 @@ mod tests {
         s.fail("server unreachable".into());
         assert_eq!(s.error(), Some("server unreachable"));
         s.note_written(10);
-        assert_eq!(s.error(), Some("server unreachable"), "a late write must not clear the error");
+        assert_eq!(
+            s.error(),
+            Some("server unreachable"),
+            "a late write must not clear the error"
+        );
     }
 
     #[test]
@@ -528,7 +846,10 @@ mod tests {
         let mut buf = [0u8; 2];
         src.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"67");
-        assert!(!src.caching_abandoned(), "a seek within cached bytes is free");
+        assert!(
+            !src.caching_abandoned(),
+            "a seek within cached bytes is free"
+        );
     }
 
     #[test]

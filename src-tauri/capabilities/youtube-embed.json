@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "youtube-embed-player",
+  "description": "Only state events from Capsule's local official YouTube embed host",
+  "windows": ["youtube-embed-*"],
+  "permissions": ["allow-youtube-embed-event"]
+}

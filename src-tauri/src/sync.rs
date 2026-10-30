@@ -57,32 +57,65 @@ pub async fn run(app: AppHandle) {
         return;
     };
 
-    let settings = { state.settings.lock().expect("settings mutex").clone() };
+    let (settings, generation) = {
+        let settings = state.settings.lock().expect("settings mutex");
+        let _db = state.db.lock().expect("db mutex");
+        (settings.clone(), state.db_generation.load(Ordering::SeqCst))
+    };
     let tokens = { state.tokens.lock().expect("tokens mutex").clone() };
 
     let (settings, navidrome_password) = crate::source::resolve(&settings);
 
     if settings.source == crate::settings::Source::Local {
-        return scan_local(app.clone(), settings.local.folders.clone(), lease).await;
+        return scan_local(
+            app.clone(),
+            settings.local.folders.clone(),
+            generation,
+            lease,
+        )
+        .await;
     }
 
-    let client = match crate::source::connect(&settings, tokens, navidrome_password) {
+    // Public collections are added on demand, with no private library session.
+    if matches!(settings.source, crate::settings::Source::Youtube | crate::settings::Source::Soundcloud) {
+        let _ = app.emit("library://updated", counts(&app));
+        emit(
+            &app,
+            &Progress {
+                stage: "done",
+                songs: 0,
+                albums: 0,
+                playlists: 0,
+                done: true,
+            },
+        );
+        return;
+    }
+    let connected = crate::source::connect(&settings, tokens, navidrome_password);
+    let client = match connected {
         Ok(c) => c,
         Err(e) => {
             let needs_auth = e.needs_auth();
             tracing::warn!(error = %e, "cannot start sync");
-            let _ =
-                app.emit("library://failed", SyncFailed { reason: e.to_string(), needs_auth });
+            let _ = app.emit(
+                "library://failed",
+                SyncFailed {
+                    reason: e.to_string(),
+                    needs_auth,
+                },
+            );
             return;
         }
     };
 
     if let crate::source::SourceClient::Navidrome(ref nd) = client {
         let shared = std::sync::Arc::new(nd.clone_for_artwork());
-        *app.state::<AppState>().navidrome.lock().expect("navidrome mutex") = Some(shared);
+        *app.state::<AppState>()
+            .navidrome
+            .lock()
+            .expect("navidrome mutex") = Some(shared);
     }
 
-    let generation = app.state::<AppState>().db_generation.load(Ordering::SeqCst);
     let still_ours = {
         let app = app.clone();
         move || app.state::<AppState>().db_generation.load(Ordering::SeqCst) == generation
@@ -114,7 +147,12 @@ pub async fn run(app: AppHandle) {
                 return;
             }
             let state = app.state::<AppState>();
-            let written = state.db.lock().expect("db mutex").upsert_songs(&rows);
+            let mut db = state.db.lock().expect("db mutex");
+            if !still_ours() {
+                return;
+            }
+            let written = db.upsert_songs(&rows);
+            drop(db);
             match written {
                 Ok(n) => bump(&songs, n),
                 Err(e) => tracing::error!(error = %e, "song batch write failed"),
@@ -135,7 +173,12 @@ pub async fn run(app: AppHandle) {
                 return;
             }
             let state = app.state::<AppState>();
-            let written = state.db.lock().expect("db mutex").upsert_albums(&rows);
+            let mut db = state.db.lock().expect("db mutex");
+            if !still_ours() {
+                return;
+            }
+            let written = db.upsert_albums(&rows);
+            drop(db);
             match written {
                 Ok(n) => bump(&albums, n),
                 Err(e) => tracing::error!(error = %e, "album batch write failed"),
@@ -156,7 +199,12 @@ pub async fn run(app: AppHandle) {
                 return;
             }
             let state = app.state::<AppState>();
-            let written = state.db.lock().expect("db mutex").upsert_playlists(&rows);
+            let mut db = state.db.lock().expect("db mutex");
+            if !still_ours() {
+                return;
+            }
+            let written = db.upsert_playlists(&rows);
+            drop(db);
             match written {
                 Ok(n) => bump(&playlists, n),
                 Err(e) => tracing::error!(error = %e, "playlist batch write failed"),
@@ -184,6 +232,9 @@ pub async fn run(app: AppHandle) {
                 Ok(track_ids) => {
                     let state = app.state::<AppState>();
                     let mut db = state.db.lock().expect("db mutex");
+                    if !still_ours() {
+                        return;
+                    }
                     if let Err(e) = db.set_playlist_tracks(&pid, &track_ids) {
                         tracing::error!(error = %e, %pid, "playlist track write failed");
                     }
@@ -202,7 +253,12 @@ pub async fn run(app: AppHandle) {
                 return;
             }
             let state = app.state::<AppState>();
-            let written = state.db.lock().expect("db mutex").upsert_artists(&rows);
+            let mut db = state.db.lock().expect("db mutex");
+            if !still_ours() {
+                return;
+            }
+            let written = db.upsert_artists(&rows);
+            drop(db);
             if let Err(e) = written {
                 tracing::error!(error = %e, "artist batch write failed");
             }
@@ -223,7 +279,9 @@ pub async fn run(app: AppHandle) {
     {
         let state = app.state::<AppState>();
         let db = state.db.lock().expect("db mutex");
-        let _ = db.set_meta("last_sync_ok", "1");
+        if state.db_generation.load(Ordering::SeqCst) == generation {
+            let _ = db.set_meta("last_sync_ok", "1");
+        }
     }
 
     tracing::info!(
@@ -242,32 +300,52 @@ pub async fn run(app: AppHandle) {
 fn fail(app: &AppHandle, stage: &str, e: crate::source::SourceError, lease: SyncLease) {
     let needs_auth = e.needs_auth();
     tracing::error!(stage, error = %e, "sync stage failed");
-    let _ = app.emit("library://failed", SyncFailed { reason: e.to_string(), needs_auth });
+    let _ = app.emit(
+        "library://failed",
+        SyncFailed {
+            reason: e.to_string(),
+            needs_auth,
+        },
+    );
     drop(lease);
 }
 
 pub fn counts(app: &AppHandle) -> LibraryCounts {
     let state = app.state::<AppState>();
-    let db = state.db.lock().expect("db mutex");
-    db.counts().unwrap_or_default()
+    crate::commands::with_library(app, &state, |db| db.counts()).unwrap_or_default()
 }
-
-async fn scan_local(app: AppHandle, folders: Vec<std::path::PathBuf>, lease: SyncLease) {
+async fn scan_local(
+    app: AppHandle,
+    folders: Vec<std::path::PathBuf>,
+    generation: u64,
+    lease: SyncLease,
+) {
     use crate::local;
 
     if folders.is_empty() {
         tracing::info!("local source with no folders configured");
         let _ = app.emit(
             "library://failed",
-            SyncFailed { reason: "no music folders chosen yet".into(), needs_auth: false },
+            SyncFailed {
+                reason: "no music folders chosen yet".into(),
+                needs_auth: false,
+            },
         );
         drop(lease);
         return;
     }
 
-    let generation = app.state::<AppState>().db_generation.load(Ordering::SeqCst);
     let emit_progress = |songs: u32, albums: u32, done: bool| {
-        emit(&app, &Progress { stage: "songs", songs, albums, playlists: 0, done });
+        emit(
+            &app,
+            &Progress {
+                stage: "songs",
+                songs,
+                albums,
+                playlists: 0,
+                done,
+            },
+        );
     };
     emit_progress(0, 0, false);
 
@@ -294,7 +372,10 @@ async fn scan_local(app: AppHandle, folders: Vec<std::path::PathBuf>, lease: Syn
             tracing::error!(error = %e, "folder scan failed");
             let _ = app.emit(
                 "library://failed",
-                SyncFailed { reason: "could not read your music folders".into(), needs_auth: false },
+                SyncFailed {
+                    reason: "could not read your music folders".into(),
+                    needs_auth: false,
+                },
             );
             drop(lease);
             return;
@@ -313,6 +394,9 @@ async fn scan_local(app: AppHandle, folders: Vec<std::path::PathBuf>, lease: Syn
 
     {
         let mut db = state.db.lock().expect("db mutex");
+        if state.db_generation.load(Ordering::SeqCst) != generation {
+            return;
+        }
         if let Err(e) = db.upsert_songs(&songs) {
             tracing::error!(error = %e, "song write failed");
         }
@@ -325,11 +409,17 @@ async fn scan_local(app: AppHandle, folders: Vec<std::path::PathBuf>, lease: Syn
     }
 
     emit_progress(songs.len() as u32, albums.len() as u32, true);
-    tracing::info!(songs = songs.len(), albums = albums.len(), "local scan complete");
+    tracing::info!(
+        songs = songs.len(),
+        albums = albums.len(),
+        "local scan complete"
+    );
 
     {
         let db = state.db.lock().expect("db mutex");
-        let _ = db.set_meta("last_sync_ok", "1");
+        if state.db_generation.load(Ordering::SeqCst) == generation {
+            let _ = db.set_meta("last_sync_ok", "1");
+        }
     }
     let _ = app.emit("library://updated", counts(&app));
     drop(lease);
@@ -347,8 +437,14 @@ mod tests {
         let g = SyncGuard::default();
         let first = g.try_begin();
         assert!(first.is_some(), "first sync should start");
-        assert!(g.try_begin().is_none(), "second concurrent sync must be refused");
+        assert!(
+            g.try_begin().is_none(),
+            "second concurrent sync must be refused"
+        );
         drop(first);
-        assert!(g.try_begin().is_some(), "guard must release after the lease drops");
+        assert!(
+            g.try_begin().is_some(),
+            "guard must release after the lease drops"
+        );
     }
 }

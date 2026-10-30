@@ -1,49 +1,47 @@
 import { useEffect, useRef, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { acceptAudioInfo, audioInfoLabel, audioInfoTooltip, type AudioInfo } from '../lib/audio-info'
 
 import type { LibraryCounts, PlayerState, Source, SyncProgress } from '../lib/ipc'
-import { Globe, Lock, QueueList, Stack, Waveform } from './icons'
+import { Globe, Lock, QueueList, Stack } from './icons'
 
 export function Readout({
   state,
   counts,
   progress,
-  storefront,
-  engineOk,
   source,
 }: {
   state: PlayerState | null
   counts: LibraryCounts | null
   progress: SyncProgress | null
-  storefront: string | null
-  engineOk: boolean
   source: Source
 }) {
-  // Apple and Spotify play through the hidden MusicKit webview; the rest decode
-  // in Rust, where none of the engine/codec/DRM badges mean anything.
-  const webview = source === 'apple' || source === 'spotify'
+  const native = source === 'local' || source === 'navidrome'
   const syncing = progress !== null && !progress.done
   const synced = progress ? progress.songs + progress.albums + progress.playlists : 0
+  const [audioInfo, setAudioInfo] = useState<AudioInfo | null>(null)
+
+  useEffect(() => {
+    setAudioInfo(null)
+    let disposed = false
+    let unlisten: (() => void) | undefined
+    const update = (info: AudioInfo) => {
+      if (!disposed) setAudioInfo(current => acceptAudioInfo(current, info) ? info : current)
+    }
+    void listen<AudioInfo>('audio://format', event => update(event.payload)).then(stop => {
+      if (disposed) stop()
+      else {
+        unlisten = stop
+        void invoke<AudioInfo>('audio_info').then(update).catch(() => {})
+      }
+    }).catch(() => {})
+    return () => { disposed = true; unlisten?.() }
+  }, [source, state?.index != null ? state.queue[state.index]?.id : null])
 
   return (
-    <div className="label flex flex-wrap items-center justify-center gap-x-5 gap-y-1 border-t border-rule px-4 py-2 [background:var(--surface-panel)]">
-      {/* Engine, codec and DRM are facts about the Apple path. A native source
-          has no webview and no DRM, and claiming otherwise was simply false. */}
-      {webview ? (
-        <>
-          <span className="flex items-center gap-1.5">
-            <span
-              className="inline-block size-1.5"
-              style={{ background: engineOk ? 'var(--color-ok)' : 'var(--color-crit)' }}
-            />
-            <span style={{ color: engineOk ? 'var(--color-ok)' : 'var(--color-crit)' }}>
-              {engineOk ? 'engine ok' : 'engine down'}
-            </span>
-          </span>
-          <Field icon={<Waveform size={11} />} title="Codec" value="aac-lc 256" />
-          <Field icon={<Lock size={11} />} title="DRM" value="widevine" />
-          {storefront && <Field icon={<Globe size={11} />} title="Storefront" value={storefront} />}
-        </>
-      ) : (
+    <div className="readout label flex flex-wrap items-center justify-center gap-x-5 gap-y-1">
+      {native && (
         <>
           <span className="flex items-center gap-1.5">
             <span className="inline-block size-1.5" style={{ background: 'var(--color-ok)' }} />
@@ -58,6 +56,11 @@ export function Readout({
         title="Library"
         value={counts ? `${counts.songs} · ${counts.albums} · ${counts.playlists}` : '-'}
       />
+      {audioInfo && state && !['idle', 'ended', 'loading'].includes(state.status) && (
+        <span className="text-ink" title={audioInfoTooltip(audioInfo)} aria-label={`Audio format: ${audioInfoLabel(audioInfo)}`}>
+          {audioInfoLabel(audioInfo)}
+        </span>
+      )}
       {state && state.queue.length > 0 && (
         <Field
           icon={<QueueList size={11} />}

@@ -1,8 +1,3 @@
-//! Which backend the library comes from.
-//!
-//! An enum, not a trait object: sources are closed and known in advance, and
-//! the MSRV (1.82) has no dyn-compatible async fn in traits.
-
 use crate::db::{AlbumUpsert, ArtistUpsert, PlaylistUpsert, SongUpsert};
 use crate::settings::{Settings, Source};
 use crate::{api, auth, subsonic};
@@ -10,6 +5,7 @@ use crate::{api, auth, subsonic};
 pub enum SourceClient {
     Apple(api::Client),
     Navidrome(subsonic::Client),
+    Spotify(std::sync::Arc<crate::spotify::Client>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +34,8 @@ pub enum SourceError {
     Apple(#[from] api::ApiError),
     #[error(transparent)]
     Navidrome(#[from] subsonic::SubsonicError),
+    #[error(transparent)]
+    Spotify(#[from] crate::spotify::Error),
 }
 
 impl SourceError {
@@ -46,7 +44,7 @@ impl SourceError {
             self,
             SourceError::Apple(api::ApiError::Unauthorized)
                 | SourceError::Navidrome(subsonic::SubsonicError::Unauthorized)
-        )
+        ) || matches!(self, Self::Spotify(e) if e.needs_auth())
     }
 }
 
@@ -89,41 +87,51 @@ pub fn navidrome_client(settings: &Settings) -> Option<subsonic::Client> {
 /// unit-testable without touching the credential store.
 pub fn connect(
     settings: &Settings,
-    tokens: Option<auth::Tokens>,
+    _tokens: Option<auth::Tokens>,
     navidrome_password: Option<String>,
 ) -> Result<SourceClient, ConnectError> {
     match settings.source {
-        Source::Apple => {
-            let tokens = tokens.filter(|t| t.is_complete()).ok_or(ConnectError::NotSignedIn)?;
-            Ok(SourceClient::Apple(api::Client::new(tokens)?))
-        }
+        Source::Apple => Err(ConnectError::Unsupported("apple")),
         Source::Navidrome => {
             let cfg = &settings.navidrome;
             if cfg.url.trim().is_empty() || cfg.username.trim().is_empty() {
                 return Err(ConnectError::NotConfigured);
             }
-            let password =
-                navidrome_password.filter(|p| !p.is_empty()).ok_or(ConnectError::NotSignedIn)?;
-            Ok(SourceClient::Navidrome(subsonic::Client::new(subsonic::Credentials {
-                base_url: cfg.url.clone(),
-                username: cfg.username.clone(),
-                password,
-            })?))
+            let password = navidrome_password
+                .filter(|p| !p.is_empty())
+                .ok_or(ConnectError::NotSignedIn)?;
+            Ok(SourceClient::Navidrome(subsonic::Client::new(
+                subsonic::Credentials {
+                    base_url: cfg.url.clone(),
+                    username: cfg.username.clone(),
+                    password,
+                },
+            )?))
         }
         // Local files have no client: scanning reads the disk directly, and
         // playback opens the path. `sync` special-cases it before reaching here.
         Source::Local => Err(ConnectError::Unsupported("local")),
         Source::Spotify => Err(ConnectError::Unsupported("spotify")),
+        Source::Youtube => Err(ConnectError::Unsupported("youtube")),
+        // Public SoundCloud tracks are searched/resolved on demand; there is
+        // no signed-in library session to connect or synchronize.
+        Source::Soundcloud => Err(ConnectError::Unsupported("soundcloud")),
     }
 }
 
 impl SourceClient {
     pub async fn library_songs(
         &self,
-        sink: impl FnMut(Vec<SongUpsert>),
+        mut sink: impl FnMut(Vec<SongUpsert>),
     ) -> Result<(), SourceError> {
         match self {
             SourceClient::Apple(c) => Ok(c.library_songs(sink).await?),
+            SourceClient::Spotify(c) => Ok(c
+                .library_songs(|rows| {
+                    sink(rows);
+                    Ok(())
+                })
+                .await?),
             SourceClient::Navidrome(c) => {
                 // Skipped albums are already logged per-album; sync only needs
                 // to know the walk completed.
@@ -138,30 +146,48 @@ impl SourceClient {
 
     pub async fn library_albums(
         &self,
-        sink: impl FnMut(Vec<AlbumUpsert>),
+        mut sink: impl FnMut(Vec<AlbumUpsert>),
     ) -> Result<(), SourceError> {
         match self {
             SourceClient::Apple(c) => Ok(c.library_albums(sink).await?),
+            SourceClient::Spotify(c) => Ok(c
+                .library_albums(|rows| {
+                    sink(rows);
+                    Ok(())
+                })
+                .await?),
             SourceClient::Navidrome(c) => Ok(c.library_albums(sink).await?),
         }
     }
 
     pub async fn library_playlists(
         &self,
-        sink: impl FnMut(Vec<PlaylistUpsert>),
+        mut sink: impl FnMut(Vec<PlaylistUpsert>),
     ) -> Result<(), SourceError> {
         match self {
             SourceClient::Apple(c) => Ok(c.library_playlists(sink).await?),
+            SourceClient::Spotify(c) => Ok(c
+                .library_playlists(|rows| {
+                    sink(rows);
+                    Ok(())
+                })
+                .await?),
             SourceClient::Navidrome(c) => Ok(c.library_playlists(sink).await?),
         }
     }
 
     pub async fn library_artists(
         &self,
-        sink: impl FnMut(Vec<ArtistUpsert>),
+        mut sink: impl FnMut(Vec<ArtistUpsert>),
     ) -> Result<(), SourceError> {
         match self {
             SourceClient::Apple(c) => Ok(c.library_artists(sink).await?),
+            SourceClient::Spotify(c) => Ok(c
+                .library_artists(|rows| {
+                    sink(rows);
+                    Ok(())
+                })
+                .await?),
             SourceClient::Navidrome(c) => Ok(c.library_artists(sink).await?),
         }
     }
@@ -195,21 +221,36 @@ mod tests {
     #[test]
     fn navidrome_without_credentials_reports_needs_auth() {
         let err = expect_err(connect(&configured_navidrome(), None, None));
-        assert!(err.needs_auth(), "missing password must prompt, not hard-fail");
+        assert!(
+            err.needs_auth(),
+            "missing password must prompt, not hard-fail"
+        );
     }
 
     #[test]
     fn navidrome_without_a_url_is_not_an_auth_problem() {
-        let s = Settings { source: Source::Navidrome, ..Settings::default() };
+        let s = Settings {
+            source: Source::Navidrome,
+            ..Settings::default()
+        };
         let err = expect_err(connect(&s, None, None));
-        assert!(!err.needs_auth(), "an unconfigured server is not a credential problem");
+        assert!(
+            !err.needs_auth(),
+            "an unconfigured server is not a credential problem"
+        );
         assert!(matches!(err, ConnectError::NotConfigured));
     }
 
     #[test]
-    fn apple_without_tokens_reports_needs_auth() {
-        let s = Settings::default();
-        assert!(expect_err(connect(&s, None, None)).needs_auth());
+    fn retired_apple_source_is_unsupported() {
+        let s = Settings {
+            source: Source::Apple,
+            ..Settings::default()
+        };
+        assert!(matches!(
+            expect_err(connect(&s, None, None)),
+            ConnectError::Unsupported("apple")
+        ));
     }
 
     #[test]
@@ -223,7 +264,19 @@ mod tests {
 
     #[test]
     fn unimplemented_sources_say_so() {
-        let s = Settings { source: Source::Local, ..Settings::default() };
-        assert!(matches!(connect(&s, None, None), Err(ConnectError::Unsupported("local"))));
+        let s = Settings {
+            source: Source::Local,
+            ..Settings::default()
+        };
+        assert!(matches!(
+            connect(&s, None, None),
+            Err(ConnectError::Unsupported("local"))
+        ));
+    }
+
+    #[test]
+    fn provider_session_errors_preserve_auth_classification() {
+        assert!(SourceError::Spotify(crate::spotify::Error::Unauthorized).needs_auth());
+        assert!(!SourceError::Spotify(crate::spotify::Error::Http(500)).needs_auth());
     }
 }

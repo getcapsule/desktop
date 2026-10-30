@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { YoutubeSetup } from './YoutubeSetup'
+import { ThemeEditor } from './ThemeEditor'
 import { open } from '@tauri-apps/plugin-dialog'
 
 import {
@@ -16,18 +18,17 @@ import {
 import { isInsecureUrl } from '../lib/navidrome'
 import { credentialStore } from '../lib/platform'
 
-export interface SourceInfo {
+interface SourceInfo {
   id: Source
   name: string
   blurb: string
-  ready: boolean
 }
 
 export const SOURCES: SourceInfo[] = [
-  { id: 'apple', name: 'Apple Music', blurb: 'Sign in with your subscription', ready: true },
-  { id: 'local', name: 'Local files', blurb: 'Point at a folder on this machine', ready: true },
-  { id: 'navidrome', name: 'Navidrome', blurb: 'Connect to your own server', ready: true },
-  { id: 'spotify', name: 'Spotify', blurb: 'Sign in with Premium', ready: false },
+  { id: 'local', name: 'Local files', blurb: 'Point at a folder on this machine' },
+  { id: 'navidrome', name: 'Navidrome', blurb: 'Connect to your own server' },
+  { id: 'youtube', name: 'YouTube Music', blurb: 'Play public tracks and playlists' },
+  { id: 'soundcloud', name: 'SoundCloud', blurb: 'Search and play public tracks' },
 ]
 
 export const GLASS = [
@@ -69,7 +70,7 @@ export function Field({
   )
 }
 
-export interface NavidromeConnectResult {
+interface NavidromeConnectResult {
   ok: boolean
   settings: Settings | null
 }
@@ -153,13 +154,12 @@ export function NavidromeFields({
   )
 }
 
-/** Selectable cards, used for both the source and the window material. */
 export function Cards<T extends string>({
   options,
   value,
   onChange,
 }: {
-  options: { id: T; name: string; blurb: string; ready?: boolean }[]
+  options: { id: T; name: string; blurb: string }[]
   value: T
   onChange: (id: T) => void
 }) {
@@ -169,7 +169,8 @@ export function Cards<T extends string>({
         <button
           key={o.id}
           onClick={() => onChange(o.id)}
-          className={`rounded border px-3.5 py-3 text-left transition-colors ${
+          aria-pressed={value === o.id}
+          className={`choice-card rounded border px-3.5 py-3 text-left transition-colors ${
             value === o.id
               ? 'card-on border-accent bg-accent/8'
               : 'border-rule hover:border-muted'
@@ -177,7 +178,6 @@ export function Cards<T extends string>({
         >
           <span className="flex items-center gap-2 text-[13px] text-ink">
             {o.name}
-            {o.ready === false && <span className="label text-[8px]">soon</span>}
           </span>
           <span className="mt-0.5 block text-[11px] text-muted">{o.blurb}</span>
         </button>
@@ -186,7 +186,6 @@ export function Cards<T extends string>({
   )
 }
 
-/** Folder list backed by the OS picker, with duplicates rejected. */
 export function Folders({
   folders,
   onChange,
@@ -329,19 +328,19 @@ function NavidromeSetup({
   )
 }
 
-/** The connection details for whichever source is selected. */
 export function SourceSetup({
   draft,
   edit,
 }: {
   draft: Settings
-  edit: (patch: Partial<Settings>) => void
+  edit: (patch: SettingsPatch) => Promise<void>
 }) {
-  if (draft.source === 'apple' || draft.source === 'spotify') {
+  if (draft.source === 'youtube') return <YoutubeSetup />
+
+  if (draft.source === 'soundcloud') {
     return (
-      <p className="text-[13px] leading-6 text-muted">
-        Sign-in happens on the service&apos;s own login page. capsule never sees your password -
-        only the tokens the page hands back, stored in {credentialStore()}.
+      <p className="text-[11px] leading-5 text-muted">
+        Search and play public SoundCloud tracks. No account, token or API key is needed.
       </p>
     )
   }
@@ -355,17 +354,23 @@ export function SourceSetup({
   )
 }
 
+export type SettingsPatch = Omit<Partial<Settings>, 'appearance'> & { appearance?: Partial<Settings['appearance']> }
+
 export function ThemePicker({
   draft,
   edit,
 }: {
   draft: Settings
-  edit: (patch: Partial<Settings>) => void
+  edit: (patch: SettingsPatch) => Promise<void>
 }) {
   const [all, setAll] = useState<ThemeSummary[]>([])
+  const selection = useRef(0)
+  const mounted = useRef(true)
 
   useEffect(() => {
+    mounted.current = true
     void themesIpc.list().then(setAll)
+    return () => { mounted.current = false }
   }, [])
 
   const active = all.find((t) => t.id === draft.appearance.theme)
@@ -381,7 +386,7 @@ export function ThemePicker({
           blurb: t.builtin ? t.polarity : `${t.polarity} · yours`,
         }))}
         value={draft.appearance.theme}
-        onChange={(theme) => edit({ appearance: { ...draft.appearance, theme } })}
+        onChange={(theme) => { selection.current++; void edit({ appearance: { theme } }) }}
       />
       {active && active.failures.length > 0 && (
         <div className="space-y-1">
@@ -398,6 +403,15 @@ export function ThemePicker({
           </ul>
         </div>
       )}
+      <ThemeEditor activeId={draft.appearance.theme} onSaved={async (id) => {
+        const revision = selection.current
+        const next = await themesIpc.list()
+        if (!mounted.current) return false
+        setAll(next)
+        if (revision !== selection.current) return false
+        await edit({ appearance: { theme: id } })
+        return true
+      }} />
     </div>
   )
 }

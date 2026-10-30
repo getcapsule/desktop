@@ -1,4 +1,3 @@
-
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +8,7 @@ pub enum Slot {
     Apple,
     Navidrome,
     Lastfm,
+    Spotify,
 }
 
 fn account_for(slot: Slot) -> &'static str {
@@ -16,6 +16,7 @@ fn account_for(slot: Slot) -> &'static str {
         Slot::Apple => "apple-music-tokens",
         Slot::Navidrome => "navidrome-credentials",
         Slot::Lastfm => "lastfm-session",
+        Slot::Spotify => "spotify-session",
     }
 }
 
@@ -49,23 +50,10 @@ fn entry() -> Result<Entry, AuthError> {
     entry_for(Slot::Apple)
 }
 
-pub fn save(tokens: &Tokens) -> Result<(), AuthError> {
-    let json = serde_json::to_string(tokens)?;
-    entry()?.set_password(&json)?;
-    Ok(())
-}
-
 pub fn load() -> Result<Option<Tokens>, AuthError> {
     match entry()?.get_password() {
         Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(AuthError::Store(e)),
-    }
-}
-
-pub fn clear() -> Result<(), AuthError> {
-    match entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(AuthError::Store(e)),
     }
 }
@@ -93,13 +81,6 @@ pub fn load_navidrome() -> Result<Option<NavidromeCredentials>, AuthError> {
     }
 }
 
-pub fn clear_navidrome() -> Result<(), AuthError> {
-    match entry_for(Slot::Navidrome)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(AuthError::Store(e)),
-    }
-}
-
 pub fn save_lastfm(session: &crate::lastfm::Session) -> Result<(), AuthError> {
     let json = serde_json::to_string(session)?;
     entry_for(Slot::Lastfm)?.set_password(&json)?;
@@ -121,10 +102,25 @@ pub fn clear_lastfm() -> Result<(), AuthError> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthStatus {
-    pub authenticated: bool,
-    pub storefront: Option<String>,
+pub fn save_spotify(session: &crate::spotify::Session) -> Result<(), AuthError> {
+    let json = serde_json::to_string(session)?;
+    entry_for(Slot::Spotify)?.set_password(&json)?;
+    Ok(())
+}
+
+pub fn load_spotify() -> Result<Option<crate::spotify::Session>, AuthError> {
+    match entry_for(Slot::Spotify)?.get_password() {
+        Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(AuthError::Store(e)),
+    }
+}
+
+pub fn clear_spotify() -> Result<(), AuthError> {
+    match entry_for(Slot::Spotify)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(AuthError::Store(e)),
+    }
 }
 
 #[cfg(test)]
@@ -164,21 +160,32 @@ mod tests {
 
     #[test]
     fn navidrome_credentials_round_trip_through_json() {
-        let creds = NavidromeCredentials { password: "hunter2".into() };
+        let creds = NavidromeCredentials {
+            password: "hunter2".into(),
+        };
         let json = serde_json::to_string(&creds).unwrap();
-        assert_eq!(serde_json::from_str::<NavidromeCredentials>(&json).unwrap(), creds);
+        assert_eq!(
+            serde_json::from_str::<NavidromeCredentials>(&json).unwrap(),
+            creds
+        );
     }
 
     #[test]
     fn apple_and_navidrome_use_distinct_accounts() {
         assert_ne!(account_for(Slot::Apple), account_for(Slot::Navidrome));
+        assert_ne!(account_for(Slot::Spotify), account_for(Slot::Apple));
+        assert_ne!(account_for(Slot::Spotify), account_for(Slot::Navidrome));
+        assert_ne!(account_for(Slot::Spotify), account_for(Slot::Lastfm));
     }
 
     #[test]
     fn the_credential_store_persists_to_disk() {
         let persistence = keyring::default::default_credential_builder().persistence();
         assert!(
-            matches!(persistence, keyring::credential::CredentialPersistence::UntilDelete),
+            matches!(
+                persistence,
+                keyring::credential::CredentialPersistence::UntilDelete
+            ),
             "keyring has no disk-backed store for this platform; credentials will \
              not survive, add the backend feature in Cargo.toml"
         );
