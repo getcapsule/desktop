@@ -41,5 +41,8 @@ jobs:
       - name: Rust tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Windows resize regression
+        run: cargo test --manifest-path src-tauri/Cargo.toml -p softbuffer --lib
+
       - name: Clippy
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

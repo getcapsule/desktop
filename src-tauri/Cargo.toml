@@ -63,6 +63,7 @@ windows = { version = "0.61", features = [
   "Win32_UI_Shell",
   "Win32_System_Com",
   "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
 ] }
 
 [dev-dependencies]
@@ -78,3 +79,8 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# Keep Windows resize buffers on their existing drawing context. The registry
+# version creates a new context on each resize and aborts if that allocation fails.
+[patch.crates-io]
+softbuffer = { path = "vendor/softbuffer" }

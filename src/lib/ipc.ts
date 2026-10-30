@@ -204,6 +204,7 @@ type Events = {
   'lastfm://linked': LastfmStatus
   'lastfm://failed': string
   'theme://changed': string
+  'appearance://changed': string
 }
 
 export function on<K extends keyof Events>(
