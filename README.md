@@ -239,7 +239,7 @@ Playback shortcuts apply outside text fields.
 
 ## Roadmap
 
-- [ ] Interface redesign, with the visual direction being developed separately.
+- [x] Interface redesign, with the visual direction being developed separately.
 - [ ] A high-quality equalizer with useful presets and precise controls.
 - [ ] Further playback recovery and transition testing across Windows and Linux.
 - [ ] Repeatable release-build benchmarks for memory, CPU, startup, and track changes.
