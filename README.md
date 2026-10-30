@@ -1,276 +1,310 @@
 # capsule
 
-A fast music client for Windows & Linux. Rust core, native `.exe`, no bundled Chromium.
+A desktop music player with a Rust audio core, public streaming sources, and your own library.
 
-One player for whichever service your music actually lives in streaming or
-your own files. The speed comes from keeping the network off the UI path:
-library metadata is mirrored into local SQLite, artwork is cached on disk, and
-lists are virtualised.
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux-30363d?style=flat-square)
+![Tauri](https://img.shields.io/badge/Tauri-2-24c8db?style=flat-square)
+![Status](https://img.shields.io/badge/status-in%20development-d4a24c?style=flat-square)
+[![License](https://img.shields.io/badge/license-GPL--3.0--only-5686bd?style=flat-square)](LICENSE)
 
-![The capsule library view, playing a track](library.png)
+[Releases](https://github.com/yvesdeniz/capsule/releases) | [Build from source](#building-from-source) | [Issues](https://github.com/yvesdeniz/capsule/issues) | [Discord](https://discord.gg/77np9hVV7M)
 
-> **Status:** early. Apple Music, local files and Navidrome work end to end
-> roughly **0.8s from double-click to audio** on a warm start. Spotify is not
-> built yet. Expect rough edges.
+## Contents
 
-## Sources
+1. [Overview / About](#overview--about)
+2. [Performance](#performance)
+3. [Features](#features)
+4. [Tech Stack](#tech-stack)
+5. [Installation](#installation)
+6. [Building from Source](#building-from-source)
+7. [Configuration & Usage](#configuration--usage)
+8. [Roadmap](#roadmap)
+9. [FAQ](#faq)
+10. [Contributing](#contributing)
+11. [License](#license)
 
-One source is active at a time, chosen in `config.toml`.
+## Overview / About
 
-| Source | State | Notes |
-|---|---|---|
-| **Apple Music** | working, Windows only | Needs a subscription; 256kbps AAC, no lossless. Widevine is not available in the Linux webview |
-| **Local files** | working on both platforms | Folder scan, tags via `lofty`, FLAC/ALAC via `symphonia` no webview, and the only path to real lossless |
-| **Navidrome** | working on both platforms | Subsonic API; plain HTTP, no DRM, decodes in Rust with no webview |
-| **Spotify** | planned | Requires Premium and their Web Playback SDK, with the same DRM constraints as Apple |
+Capsule brings local music, self-hosted libraries, and public streaming audio into one player. Import a playlist, browse its songs alongside your library, and play through the native audio engine.
 
-Local files and Navidrome share nothing with a streaming source no catalog
-ids, no tokens, no webview which is what forced the playback abstraction to be
-honest rather than shaped around one service.
+**Playback sources and import providers are separate.** A Spotify playlist supplies metadata. Its tracks play through an available local file, Navidrome recording, YouTube recording, or SoundCloud stream.
 
-## Requirements
+| Service | Playback | Library / metadata |
+| --- | --- | --- |
+| Local files | Native file playback | Folder scanning and audio tags |
+| Navidrome | Native playback through Subsonic | Connected server library |
+| YouTube / YouTube Music | Public audio streams | Public track, album, and playlist imports |
+| SoundCloud | Public audio streams | Public imports and song, artist, and album search |
+| Spotify | Metadata only | Public track, album, and playlist imports |
+| Apple Music | Metadata only | Public song, album, and playlist imports |
 
-**Windows 10/11**
+Capsule is in active development. Windows has the most recent real-device streaming validation. Linux is a release-build target, with broader playback and desktop acceptance testing ongoing.
 
-- WebView2 **Evergreen** runtime (preinstalled on Windows 11). A *fixed-version*
-  runtime will fail with an expired Widevine licence
+## Performance
 
-**Linux** (x86_64; built and tested on Ubuntu 22.04)
+| Area | Implementation |
+| --- | --- |
+| Browsing | Local SQLite metadata, revision-cached views, paged queries, and virtualized lists |
+| Streaming | Reused HTTP clients, bounded concurrency, and progressive buffering |
+| YouTube transitions | Decoded audio prepared for the next verified recording, with sample-boundary handoff when ready |
+| Recovery | Expiring stream URL caches, bounded retries, and automatic attempts across plausible recordings |
+| Background work | Cancellation of superseded work and coalesced listening-state writes |
 
-- `webkit2gtk-4.1` Tauri's webview
-- `libasound2` ALSA, what audio decodes through
-- `libdbus-1` the credential store and MPRIS both speak D-Bus
-- `libayatana-appindicator3` (or `libappindicator3`) system tray
-- A Secret Service provider running gnome-keyring or KWallet. Without one,
-  nothing you sign in to is remembered between launches
+The YouTube handoff pipeline mixes at 48 kHz stereo. It is not bit-perfect output. Unavailable or unprepared successors can still cause a gap. Local files and Navidrome use a separate loading path.
 
-Media keys come from MPRIS, which your desktop routes over the same session bus
-as the credential store. GNOME and KDE both do this out of the box.
+Measure Capsule together with its WebView processes. The [Windows process sampler](scripts/performance-measure.ps1) records private memory, working set, and CPU usage. Compare development and release builds separately, using the same library, playback state, and cache conditions.
 
-The `.deb` pulls these in. For the `.AppImage` install them yourself.
+## Features
 
-**Both**
+### Library and discovery
 
-- For streaming sources: an **active subscription** to that service without
-  one you get 30-second previews
+- Songs, albums, artists, playlists, favorites, and listening history.
+- SoundCloud public catalog search for songs, artists, and albums.
+- Public URL imports without manually supplying account tokens in the normal workflow.
+- Library views populated from saved imports, with playlist order and repeated entries preserved.
+- Cached search and sorting, local playlists, and local edits to imported collections.
 
-Apple Music is Windows-only: it needs Widevine, which the Linux webview does not
-have. Local files and Navidrome run on both. The acrylic and mica window
-materials are Windows-only too, and fall back to the solid theme.
+### Playback and downloads
 
-## Getting started
+- Native playback of supported formats, including MP3, WAV, FLAC, AAC, and ALAC.
+- Public YouTube audio and supported progressive or unencrypted HLS SoundCloud streams.
+- Queue editing, play next, shuffle, repeat, seeking, and undo for queue changes.
+- Automatic recording recovery before manual selection becomes necessary.
+- Track and album downloads with progress, cancellation, retry, and folder reveal.
+- Original encoded audio downloads and local playback links for downloaded canonical recordings.
+- Paused session restoration, output-device selection, and a sleep timer.
 
-There are [published builds](https://github.com/yvesdeniz/capsule/releases), but if you wanna you compile it yourself. Beyond the
-requirements above you need:
+### Lyrics and desktop integration
 
-- **Rust 1.82+** via [rustup](https://rustup.rs)
-- **Bun** via [bun.sh](https://bun.sh)
-- **On Windows: MSVC C++ build tools** Tauri links against them. Installed with
-  Visual Studio, or standalone with the *Desktop development with C++* workload
-- **On Linux: the `-dev` packages** for the libraries above, plus
-  `build-essential`, `patchelf`, `librsvg2-dev` and `libxdo-dev`. The exact
-  `apt-get` line CI uses is in `.github/workflows/release.yml`
+- Synced and plain lyrics from LRCLIB, including lookups for imported tracks.
+- Click-to-seek lyrics, timing calibration, and retry for failed requests.
+- System tray, close-to-tray behavior, and media controls.
+- Windows taskbar playback buttons and Snap Layout support.
+- Optional Last.fm scrobbling and Discord Rich Presence with cover artwork.
+- Theme editing, previews, and TOML theme import/export.
+
+## Tech Stack
+
+| Layer | Technologies |
+| --- | --- |
+| Desktop shell | Tauri 2, WebView2 / WebKitGTK |
+| Interface | React 19, TypeScript, Tailwind CSS 4, Vite |
+| Core | Rust, Tokio |
+| Audio | rodio, Symphonia, CPAL |
+| Storage | SQLite through rusqlite, TOML settings, disk caches |
+| Metadata and networking | reqwest, RustyPipe, public provider adapters, Subsonic |
+| File metadata | lofty |
+| Desktop services | souvlaki, OS credential storage, Discord Rich Presence |
+| Development | Bun, Cargo, Vitest, Testing Library, Clippy |
+
+## Installation
+
+Check the [Releases page](https://github.com/yvesdeniz/capsule/releases) for available packages. If a package for your platform is unavailable, build from source.
+
+| Platform | Package | Requirements |
+| --- | --- | --- |
+| Windows 10 / 11 | NSIS `.exe` installer | WebView2 Evergreen runtime; the installer can bootstrap it |
+| Linux x86_64 | `.deb` or `.AppImage` | WebKitGTK 4.1, ALSA, D-Bus, and an AppIndicator-compatible tray library |
+
+On Linux, GNOME Keyring, KWallet, or another Secret Service provider is needed for persistent credential storage. Media controls use MPRIS over the desktop session bus. Install `.deb` packages through your package manager; mark an AppImage executable before running it.
+
+Acrylic and mica window materials are Windows-specific. Other platforms use the solid theme.
+
+## Building from Source
+
+### Prerequisites
+
+- A current stable Rust toolchain, installed through rustup.
+- Bun. Tauri's frontend development and build hooks invoke Bun directly.
+- Git.
+- Windows: MSVC build tools with the **Desktop development with C++** workload.
+- Linux: the development packages below.
+
+For Ubuntu 22.04, matching the release workflow:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential patchelf file \
+  libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev \
+  libasound2-dev libdbus-1-dev libxdo-dev libssl-dev
+```
+
+### Run in development
 
 ```bash
 git clone https://github.com/yvesdeniz/capsule.git
 cd capsule
-bun install
+bun install --frozen-lockfile
 bun run app
 ```
 
-The first compile pulls the whole Rust dependency tree and takes a few minutes.
-Later runs start in seconds. For an installer instead of a dev window:
+The first Rust build takes longer while dependencies compile.
+
+### Build an installer
+
+Windows:
 
 ```bash
-bun run app:build    # installer under src-tauri/target/release/bundle/
-                     # NSIS on Windows, .deb and .AppImage on Linux
+bun run app:build
 ```
+
+Linux:
+
+```bash
+bun run app:build --bundles deb,appimage
+```
+
+Packages are written to `src-tauri/target/release/bundle/`. The [release workflow](.github/workflows/release.yml) defines the platform build matrix.
+
+### Run checks
+
+```bash
+bun run typecheck
+bun run test
+bun run build
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+cargo clippy --manifest-path src-tauri/Cargo.toml --lib -- -D warnings
+```
+
+Tests requiring public services or real audio output are ignored by default. Run those explicitly when validating streaming or downloads.
+
+## Configuration & Usage
 
 ### First run
 
-1. **Sign in.** A window opens on the service's own login page capsule has no
-   login form and never sees your password. Tokens go to the OS credential
-   store. If you dismiss it, **Open sign-in** brings it back.
-2. **Sync your library.** Press **Sync library** in the sidebar. This mirrors
-   catalog metadata into local SQLite and caches artwork to disk; it is the one
-   slow step, and it is why later startups don't touch the network.
-3. **Play.** Double-click any track. `Ctrl+K` opens the command palette.
+1. Choose a playback source in setup or Settings.
+2. For local files, select your music folders. For Navidrome, connect your server.
+3. For public streaming, import a supported URL or search SoundCloud in Discover.
+4. Open a playlist, album, or song and start playback. Use the queue or a track's More menu for listening actions.
 
-A muted track plays automatically at startup that is deliberate, and the
-reason is under [Honest caveats](#honest-caveats).
+Public YouTube and SoundCloud playback does not require an account connection. Private libraries, restricted recordings, and encrypted streams are outside this public playback workflow.
 
-Nothing else is required. `config.toml` is written on demand in the data
-directory (see [Configuration](#configuration)), and Last.fm or Discord Rich
-Presence stay off until you supply keys. Those two are read at **compile
-time**, so copy `.env.example` to `.env` and fill it in *before* building
-changing them later means rebuilding.
+### Import a collection
 
-## What it does
+Open **Settings > Import**, paste a supported public URL, preview the metadata, and save it as a Capsule playlist. Imports persist across restarts and source changes. Incomplete collections or unavailable tracks produce preview warnings.
 
-- **Library** songs, albums and playlists mirrored locally; search and a
-  `Ctrl+K` command palette
-- **Playback** queue, shuffle, repeat, seek, volume
-- **Lyrics** time-synced, from [LRCLIB](https://lrclib.net), with dots through
-  intros and instrumental breaks and a one-time timing calibration
-- **Desktop integration** system tray, a frameless window, and hardware media
-  keys with a now-playing card on both platforms via SMTC on Windows and
-  MPRIS on Linux. Windows also gets taskbar thumbnail controls and Snap Layouts
-- **Optional** Last.fm scrobbling and Discord Rich Presence, once keys are
-  supplied
+Title, artist, version, and duration evidence guide automatic playback matching. A manual recording choice is a fallback when recovery cannot find suitable playable audio.
 
-## How it works
+Public import adapters are unofficial and can need maintenance when provider websites change. Advanced metadata API access is optional and separate from the normal import and playback flows.
 
-A Rust core owns all state; sources plug in behind it. DRM-backed streaming is
-the awkward case it needs a second, hidden webview, because the playback SDK
-requires Widevine and its token is bound to the service's own origin:
+### Download music
 
-```mermaid
-flowchart TD
-    UI["<b>Visible window</b><br/>React UI<br/><i>never talks to the service</i>"]
-    ENGINE["<b>Hidden window</b><br/>service web player + engine hook<br/><i>its SDK as an audio daemon</i>"]
-    CORE["<b>Rust core</b><br/>single source of truth"]
-    OS["Media flyout · tray · taskbar"]
+Use **Download** in Discover, **Download all** in an album or playlist, or **More > Download track**. Choose a destination folder on the first download. Open **Downloads** to monitor progress, cancel, retry, or show a completed file.
 
-    UI -- "IPC" --> CORE
-    ENGINE -- "IPC" --> CORE
-    CORE --> OS
-```
+Two transfers run at once. Each batch supports up to 500 tracks, with a 500-entry session queue/history limit and a 2 GB per-file limit. SoundCloud HLS transfers have additional manifest and audio limits. Existing files are not overwritten, and downloads keep the source's encoded format. Activity history is session-only; completed files and saved local playback links persist.
 
-The hidden window is the service's own web player, invisible, reduced to an
-audio daemon. The UI you see is entirely ours and never talks to the service
-directly.
+### Settings and credentials
 
-Local files and Navidrome need none of this they decode in Rust with no
-webview at all, which is why they are also the only routes to lossless.
+The data directory contains `config.toml`, library databases, listening state, and caches:
 
-Because Rust holds the only copy of playback state, the UI, the media flyout,
-the taskbar buttons and the scrobbler can't drift out of sync and a new source
-only has to satisfy that core, not the interface.
+| Platform | Default data directory |
+| --- | --- |
+| Windows | `%APPDATA%\com.deniz.capsule\` |
+| Linux | `~/.local/share/com.deniz.capsule/` |
 
-## Configuration
-
-Settings live in `config.toml`, next to the library in the data directory
-`%APPDATA%\com.deniz.capsule\` on Windows, `~/.local/share/com.deniz.capsule/`
-on Linux. It is created on demand and safe to hand-edit a partial file is
-fine, and anything malformed falls back to defaults rather than refusing to
-start.
+A minimal configuration:
 
 ```toml
-source = "apple"     # apple | local | navidrome | spotify
+source = "local" # local | navidrome | youtube | soundcloud
+
+[local]
+folders = []
 
 [navidrome]
-url = ""             # https://music.example.com
-username = ""        # the password lives in the OS credential store, not here
+url = "https://music.example.com"
+username = "your-username"
 
 [lyrics]
-offset_ms = 0        # timing calibration, set from the lyrics view
-
-[lastfm]
-api_key = ""         # register an application at last.fm/api
-shared_secret = ""   # the session key lives in the credential store, not here
-
-[discord]
-client_id = ""
+offset_ms = 0
 ```
 
-Secrets are never written here. Service tokens and passwords go to the OS
-credential store Credential Manager on Windows, Secret Service (gnome-keyring
-or KWallet) on Linux so this file is safe to share when reporting a bug.
+Use Settings for normal configuration. Passwords and account sessions use the OS credential store. Optional Last.fm and Discord application credentials can come from settings or compile-time environment variables; runtime settings take precedence. See [.env.example](.env.example) for supported keys and development overrides. Review configuration before sharing it in a bug report.
 
-## Honest caveats
+Desktop preferences use `desktop-preferences.json`. Listening state uses `listening-state.sqlite3`. Restored playback stays paused until you press Play.
 
-These come from streaming DRM, mostly not from the app. Local files and
-Navidrome avoid nearly all of them.
+### Keyboard shortcuts
 
-**Streaming quality is capped at 256kbps AAC.** Measured, not assumed: EME
-negotiates `com.widevine.alpha` for `mp4a.40.2`, and the playback SDK offers
-only 64 and 256. Lossless streams are reserved for first-party clients, which
-binds every third-party player. Lossless comes with local files.
+Playback shortcuts apply outside text fields.
 
-**Apple Music sits around 1 GB while streaming.** The Rust core is ~70 MB of
-that; the rest is WebView2 and Apple's own web app, which is the price of the
-DRM path. Local files and Navidrome need no webview and sit nearer **200 MB**,
-less once the window is in the tray.
+| Shortcut | Action |
+| --- | --- |
+| `Space` | Play / pause |
+| `Alt+Left` / `Alt+Right` | Previous / next track |
+| `Ctrl+K` | Command palette |
+| `Ctrl+F` | Focus search |
+| `Ctrl+Q` | Open queue |
+| `Ctrl+A` | Select current library results |
+| `Ctrl+Z` | Undo a queue change while the queue is open |
 
-**The default token path is unofficial.** The app reuses the developer token the
-service ships in its own web page. It works, but that bundle can change and
-break it. Supply your own key if you hold a developer membership see
-`.env.example`.
+## Roadmap
 
-**Streaming playback has three quirks worth knowing.** A muted track plays at
-startup (there is no way to warm the DRM path without playing it saves ~5s on
-your first real play, but may show in your listening history). *Previous track*
-only reaches back to where you started, since the queue is built forward from
-your click. And tracks the catalog can't resolve are skipped silently, because
-the SDK rejects an entire queue if any single track fails.
+- [ ] Interface redesign, with the visual direction being developed separately.
+- [ ] A high-quality equalizer with useful presets and precise controls.
+- [ ] Further playback recovery and transition testing across Windows and Linux.
+- [ ] Repeatable release-build benchmarks for memory, CPU, startup, and track changes.
+- [ ] Continued lyrics, download, and provider-adapter improvements.
+- [ ] Review external requests and keep optional integrations explicit.
 
-**Your Apple credentials never touch this app.** Sign-in happens on Apple's own
-login page inside the engine window. No login form here, no password seen or
-stored, tokens in the OS credential store.
+Downloads, lyrics improvements, and the audio-format readout are implemented. This roadmap lists further work rather than release-date commitments.
 
-**Scrobbling takes one route, never two.** Connect your Last.fm account in
-Settings and every source reports plays directly, local files included. Without
-it, only a server that scrobbles on your behalf can report anything - which is
-why local files used to count for nothing. When a Last.fm account is linked
-capsule stops asking Navidrome to forward plays, because two routes to the same
-account would count every play twice.
+## FAQ
 
-**Navidrome is different, and cannot be otherwise.** Subsonic authenticates
-every request with `md5(password + salt)`, so the app has to hold your actual
-password rather than a token derived from it. It goes to the OS credential
-store and never to `config.toml` but it is a real password at rest, and
-over plain `http://` the derived token can be replayed by anyone on the
-network. The connect screen says so when your URL is not HTTPS.
+### Do Spotify imports require Premium?
 
-## Development
+Public Spotify URL imports do not require Premium or a developer application. Optional authorized metadata API access has separate provider requirements. Capsule does not use Spotify for audio playback.
 
-Setup is the same as [Getting started](#getting-started). Useful while
-debugging:
+### Does importing from Apple Music make it a playback source?
 
-```bash
-SHOW_ENGINE_WINDOW=true bun run app          # un-hide the playback webview
-CAPSULE_GLASS=acrylic-chrome bun run app     # window transparency variants
-```
+No. Apple Music supplies import metadata. Playback uses one of Capsule's supported audio sources. The former Apple Music playback engine has been removed.
 
-Tests and checks:
+### Why does a downloaded YouTube track use M4A instead of MP3?
 
-```bash
-cd src-tauri && cargo test && cargo clippy --all-targets -- -D warnings
-bun run typecheck && bun run test
-```
+Capsule saves the original AAC audio in its MP4/M4A container. Converting it to MP3 would add processing and another lossy encoding step. A container name and an audio codec describe different parts of the file.
 
-The taskbar buttons in `src-tauri/icons/thumb/` are separate 16–32px `.ico`
-files, embedded at compile time swap them for any icon set you like.
+### Are downloads lossless?
 
-### Adding a command
+They preserve the available source audio. A FLAC source remains lossless; saving a lossy stream does not turn it into lossless audio. Capsule does not re-encode normal downloads.
 
-A Tauri command must be registered in **three** places or it compiles fine and
-is denied at runtime with `not allowed. Command not found`:
+### Why can a public recording still fail to play?
 
-1. `generate_handler!` in `src-tauri/src/lib.rs`
-2. the command list in `src-tauri/build.rs` this generates the `allow-*`
-   permission
-3. the matching `allow-<command>` entry in `src-tauri/capabilities/main.json`
+Availability can depend on the recording, region, provider restrictions, or an upstream API change. Capsule refreshes eligible stream URLs and tries suitable alternatives before asking for a manual choice.
 
-## Getting help
+### Why are lyrics missing or temporarily unavailable?
 
-**[Discord](https://discord.gg/77np9hVV7M)** for questions, setup trouble, and anything
-that is easier to work out in conversation.
+LRCLIB may not have that recording, and its service can be unavailable. Use Retry for a fresh lookup. A failed request is not stored as a permanent missing result.
 
-**[Issues](https://github.com/yvesdeniz/capsule/issues)** for bugs and feature
-requests, so they do not scroll away.
+### Why does Task Manager show WebView processes?
 
-If you are reporting something broken, turn on **Developer mode** in Settings
-and press **Copy diagnostics**. It reports which source is active, which backend
-is live, your library counts and what the player thinks it is doing. Your server
-address, username and passwords are not included, so it is safe to paste in
-public.
+The interface runs in the system webview. Include those processes when measuring Capsule's total resource usage. Audio decoding and playback state live in Rust.
 
-`config.toml` is safe to share too - every secret lives in the OS credential
-store, never in that file.
+### What leaves my machine?
 
-## Licence
+Online imports, search, lyrics, and streaming contact their respective providers. Library data and listening state are stored locally. Last.fm and Discord are optional integrations. Signed Navidrome cover sharing requires its explicit opt-in setting; Capsule does not upload private local artwork for presence.
 
-GPL. See [LICENSE](LICENSE).
+## Contributing
 
-Not affiliated with or endorsed by Apple. Apple Music is a trademark of Apple Inc.
+Bug reports, focused fixes, and improvements to provider reliability are welcome. Use [Issues](https://github.com/yvesdeniz/capsule/issues) for bugs and proposals, or [Discord](https://discord.gg/77np9hVV7M) for setup questions.
+
+For a bug report, include your OS, Capsule version, playback source, reproduction steps, and the exact error. Developer mode provides diagnostics in Settings. Remove credentials and personal server details from reports.
+
+Before opening a pull request:
+
+1. Keep the change focused and describe the resulting behavior.
+2. Run the relevant frontend and Rust checks from Building from Source.
+3. Add regression coverage for behavior changes and report any live tests performed.
+4. Preserve source boundaries, bounded background work, and cancellation behavior.
+
+New Tauri commands must be registered in all three places:
+
+- `src-tauri/src/lib.rs`: command handler registration.
+- `src-tauri/build.rs`: generated command permission.
+- `src-tauri/capabilities/main.json`: permission granted to the main window.
+
+Keep playback and queue state in Rust, and keep credentials and signed media addresses out of logs and frontend state.
+
+## License
+
+Capsule is licensed under **GPL-3.0-only**. See [LICENSE](LICENSE).
+
+Capsule is an independent project and is not affiliated with or endorsed by the music services it supports. Service names and trademarks belong to their owners.
