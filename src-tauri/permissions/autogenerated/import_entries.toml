@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-entries"
+description = "Enables the import_entries command without any pre-configured scope."
+commands.allow = ["import_entries"]
+
+[[permission]]
+identifier = "deny-import-entries"
+description = "Denies the import_entries command without any pre-configured scope."
+commands.deny = ["import_entries"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-retry-playback"
+description = "Enables the import_retry_playback command without any pre-configured scope."
+commands.allow = ["import_retry_playback"]
+
+[[permission]]
+identifier = "deny-import-retry-playback"
+description = "Denies the import_retry_playback command without any pre-configured scope."
+commands.deny = ["import_retry_playback"]

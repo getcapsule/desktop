@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-resolve"
+description = "Enables the import_resolve command without any pre-configured scope."
+commands.allow = ["import_resolve"]
+
+[[permission]]
+identifier = "deny-import-resolve"
+description = "Denies the import_resolve command without any pre-configured scope."
+commands.deny = ["import_resolve"]

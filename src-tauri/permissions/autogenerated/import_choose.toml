@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-choose"
+description = "Enables the import_choose command without any pre-configured scope."
+commands.allow = ["import_choose"]
+
+[[permission]]
+identifier = "deny-import-choose"
+description = "Denies the import_choose command without any pre-configured scope."
+commands.deny = ["import_choose"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-source-preference"
+description = "Enables the import_source_preference command without any pre-configured scope."
+commands.allow = ["import_source_preference"]
+
+[[permission]]
+identifier = "deny-import-source-preference"
+description = "Denies the import_source_preference command without any pre-configured scope."
+commands.deny = ["import_source_preference"]

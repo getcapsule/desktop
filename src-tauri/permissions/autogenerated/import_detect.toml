@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-detect"
+description = "Enables the import_detect command without any pre-configured scope."
+commands.allow = ["import_detect"]
+
+[[permission]]
+identifier = "deny-import-detect"
+description = "Denies the import_detect command without any pre-configured scope."
+commands.deny = ["import_detect"]

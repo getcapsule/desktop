@@ -5,6 +5,12 @@ use std::path::{Path, PathBuf};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
+mod imports;
+mod import_metadata;
+mod library_queries;
+mod imported_library;
+pub use imported_library::LibraryView;
+
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error("sqlite: {0}")]
@@ -13,6 +19,8 @@ pub enum DbError {
     NoDataDir,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Import(String),
 }
 
 const MIGRATIONS: &[&str] = &[
@@ -89,6 +97,84 @@ const MIGRATIONS: &[&str] = &[
         fetched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     "#,
+    r#"
+    CREATE TABLE tracks (
+        id           TEXT PRIMARY KEY,
+        title        TEXT NOT NULL,
+        artists      TEXT NOT NULL DEFAULT '',
+        album        TEXT,
+        duration_ms  INTEGER,
+        artwork_url  TEXT,
+        isrc         TEXT,
+        created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE track_origins (
+        track_id     TEXT NOT NULL,
+        platform     TEXT NOT NULL,
+        external_id  TEXT NOT NULL,
+        url          TEXT,
+        imported_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (platform, external_id)
+    );
+    CREATE TABLE playback_mappings (
+        track_id     TEXT NOT NULL,
+        provider     TEXT NOT NULL,
+        external_id  TEXT NOT NULL,
+        confidence   REAL NOT NULL DEFAULT 1.0,
+        verified     INTEGER NOT NULL DEFAULT 0,
+        matched_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (track_id, provider)
+    );
+    CREATE TABLE import_jobs (
+        id                 TEXT PRIMARY KEY,
+        source_url         TEXT NOT NULL,
+        provider           TEXT NOT NULL,
+        collection_type    TEXT NOT NULL,
+        collection_title   TEXT,
+        collection_artwork TEXT,
+        total_tracks       INTEGER NOT NULL DEFAULT 0,
+        processed          INTEGER NOT NULL DEFAULT 0,
+        matched            INTEGER NOT NULL DEFAULT 0,
+        needs_review       INTEGER NOT NULL DEFAULT 0,
+        unavailable        INTEGER NOT NULL DEFAULT 0,
+        error              TEXT,
+        status             TEXT NOT NULL DEFAULT 'pending',
+        created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX idx_tracks_isrc ON tracks(isrc);
+    CREATE INDEX idx_track_origins_track ON track_origins(track_id);
+    CREATE INDEX idx_playback_mappings_track ON playback_mappings(track_id);
+    "#,
+    r#"
+    ALTER TABLE tracks ADD COLUMN explicit INTEGER;
+    ALTER TABLE track_origins ADD COLUMN metadata_json TEXT;
+    ALTER TABLE playlists ADD COLUMN source_url TEXT;
+    ALTER TABLE playlists ADD COLUMN is_local INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE playlist_tracks ADD COLUMN entry_id TEXT;
+    UPDATE playlist_tracks SET entry_id = lower(hex(randomblob(16)));
+    CREATE UNIQUE INDEX idx_playlist_entry ON playlist_tracks(entry_id);
+    ALTER TABLE import_jobs ADD COLUMN playlist_id TEXT;
+    ALTER TABLE import_jobs ADD COLUMN preview_json TEXT;
+    CREATE TABLE track_resolution (
+        track_id TEXT PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+        state TEXT NOT NULL DEFAULT 'pending',
+        candidates_json TEXT NOT NULL DEFAULT '[]',
+        error TEXT,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE resolution_cache (
+        query TEXT PRIMARY KEY,
+        candidates_json TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE track_source_preferences (
+        track_id TEXT PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL
+    );
+    "#,
+    "ALTER TABLE import_jobs ADD COLUMN skipped_tracks INTEGER NOT NULL DEFAULT 0;",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +203,7 @@ impl Artwork {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SongRow {
     pub id: String,
     pub catalog_id: Option<String>,
@@ -128,6 +214,48 @@ pub struct SongRow {
     pub artwork_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackRow {
+    pub id: String,
+    pub title: String,
+    pub artists: String,
+    pub album: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub artwork_url: Option<String>,
+    pub isrc: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackMappingRow {
+    pub track_id: String,
+    pub provider: String,
+    pub external_id: String,
+    pub confidence: f64,
+    pub verified: bool,
+    pub matched_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportJobRow {
+    pub id: String,
+    pub source_url: String,
+    pub provider: String,
+    pub collection_type: String,
+    pub collection_title: Option<String>,
+    pub collection_artwork: Option<String>,
+    pub total_tracks: i64,
+    pub processed: i64,
+    pub matched: i64,
+    pub needs_review: i64,
+    pub unavailable: i64,
+    pub error: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AlbumRow {
     pub id: String,
@@ -135,6 +263,15 @@ pub struct AlbumRow {
     pub artist_name: String,
     pub artwork_url: Option<String>,
     pub track_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtistRow {
+    pub id: String,
+    pub name: String,
+    pub artwork_url: Option<String>,
+    pub song_count: u32,
+    pub album_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -154,6 +291,7 @@ pub struct LibraryCounts {
 
 pub struct Db {
     conn: Connection,
+    projected_counts: Option<LibraryCounts>,
 }
 
 impl Db {
@@ -174,7 +312,7 @@ impl Db {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
-        let mut db = Self { conn };
+        let mut db = Self { conn, projected_counts: None };
         db.migrate()?;
         Ok(db)
     }
@@ -193,6 +331,91 @@ impl Db {
             tracing::info!(version = i + 1, "applied db migration");
         }
         Ok(())
+    }
+
+    pub fn upsert_track(&mut self, track: &TrackRow) -> Result<(), DbError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO tracks (id, title, artists, album, duration_ms, artwork_url, isrc, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, CURRENT_TIMESTAMP)
+             ON CONFLICT(id) DO UPDATE SET
+               title = excluded.title,
+               artists = excluded.artists,
+               album = excluded.album,
+               duration_ms = excluded.duration_ms,
+               artwork_url = excluded.artwork_url,
+               isrc = excluded.isrc,
+               updated_at = CURRENT_TIMESTAMP",
+            params![
+                track.id,
+                track.title,
+                track.artists,
+                track.album,
+                track.duration_ms.map(|v| v as i64),
+                track.artwork_url,
+                track.isrc,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn upsert_playback_mapping(&mut self, mapping: &PlaybackMappingRow) -> Result<(), DbError> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO playback_mappings (track_id, provider, external_id, confidence, verified)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(track_id, provider) DO UPDATE SET
+               external_id = excluded.external_id,
+               confidence = excluded.confidence,
+               verified = excluded.verified,
+               matched_at = CURRENT_TIMESTAMP",
+            params![
+                mapping.track_id,
+                mapping.provider,
+                mapping.external_id,
+                mapping.confidence,
+                mapping.verified as i32,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_import_job(&self, id: &str) -> Result<Option<ImportJobRow>, DbError> {
+        let res = self.conn.query_row(
+            "SELECT id, source_url, provider, collection_type, collection_title, collection_artwork, total_tracks, processed, matched, needs_review, unavailable, error, status, created_at, updated_at FROM import_jobs WHERE id = ?1",
+            params![id],
+            |row| {
+                Ok(ImportJobRow {
+                    id: row.get(0)?,
+                    source_url: row.get(1)?,
+                    provider: row.get(2)?,
+                    collection_type: row.get(3)?,
+                    collection_title: row.get(4)?,
+                    collection_artwork: row.get(5)?,
+                    total_tracks: row.get(6)?,
+                    processed: row.get(7)?,
+                    matched: row.get(8)?,
+                    needs_review: row.get(9)?,
+                    unavailable: row.get(10)?,
+                    error: row.get(11)?,
+                    status: row.get(12)?,
+                    created_at: row.get(13)?,
+                    updated_at: row.get(14)?,
+                })
+            },
+        ).optional()?;
+        Ok(res)
+    }
+
+    pub fn find_track_by_origin(&self, platform: &str, external_id: &str) -> Result<Option<String>, DbError> {
+        let res = self.conn.query_row(
+            "SELECT track_id FROM track_origins WHERE platform = ?1 AND external_id = ?2",
+            params![platform, external_id],
+            |row| row.get(0),
+        ).optional()?;
+        Ok(res)
     }
 
     pub fn upsert_songs(&mut self, rows: &[SongUpsert]) -> Result<usize, DbError> {
@@ -432,21 +655,6 @@ impl Db {
         Ok(row)
     }
 
-    pub fn first_playable_catalog_id(&self) -> Result<Option<String>, DbError> {
-        let id = self
-            .conn
-            .query_row(
-                "SELECT s.catalog_id FROM songs s
-                 LEFT JOIN unresolvable u ON u.catalog_id = s.catalog_id
-                 WHERE s.catalog_id IS NOT NULL AND u.catalog_id IS NULL
-                 LIMIT 1",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()?;
-        Ok(id)
-    }
-
     pub fn unresolvable_ids(&self) -> Result<HashSet<String>, DbError> {
         let mut stmt = self.conn.prepare("SELECT catalog_id FROM unresolvable")?;
         let ids = stmt
@@ -464,6 +672,13 @@ impl Db {
             .query_map(params![limit, offset], map_song)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+
+    pub fn song_by_id(&self, id: &str) -> Result<Option<SongRow>, DbError> {
+        Ok(self.conn.query_row(
+            "SELECT id,catalog_id,name,artist_name,album_name,duration_ms,artwork_url FROM songs WHERE id=?1",
+            [id], map_song,
+        ).optional()?)
     }
 
     pub fn album_songs(&self, album_id: &str) -> Result<Vec<SongRow>, DbError> {
@@ -528,6 +743,7 @@ impl Db {
     }
 
     pub fn counts(&self) -> Result<LibraryCounts, DbError> {
+        if let Some(counts) = self.projected_counts { return Ok(counts); }
         let one = |sql: &str| -> Result<u32, DbError> {
             Ok(self.conn.query_row(sql, [], |r| r.get::<_, i64>(0))? as u32)
         };
@@ -535,7 +751,7 @@ impl Db {
             songs: one("SELECT COUNT(*) FROM songs")?,
             albums: one("SELECT COUNT(*) FROM albums")?,
             playlists: one("SELECT COUNT(*) FROM playlists")?,
-            artists: one("SELECT COUNT(*) FROM artists")?,
+            artists: one("SELECT COUNT(*) FROM (SELECT name FROM artists WHERE trim(name) <> '' UNION SELECT artist_name FROM songs WHERE trim(artist_name) <> '' UNION SELECT artist_name FROM albums WHERE trim(artist_name) <> '')")?,
         })
     }
 
@@ -665,6 +881,8 @@ pub fn default_db_path(
         crate::settings::Source::Apple => "library-apple.sqlite3",
         crate::settings::Source::Navidrome => "library-navidrome.sqlite3",
         crate::settings::Source::Spotify => "library-spotify.sqlite3",
+        crate::settings::Source::Youtube => "library-youtube.sqlite3",
+        crate::settings::Source::Soundcloud => "library-soundcloud.sqlite3",
         crate::settings::Source::Local => "library-local.sqlite3",
     };
     Ok(app_data.ok_or(DbError::NoDataDir)?.join(file))
@@ -695,6 +913,36 @@ pub fn migrate_legacy_db(dir: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lyrics_find_canonical_metadata_and_expire_negative_cache() {
+        let db = Db::init(Connection::open_in_memory().unwrap()).unwrap();
+        db.conn.execute("INSERT INTO tracks(id,title,artists,album,duration_ms) VALUES('canonical','Song','[\"Artist\"]','Album',200000)", []).unwrap();
+        assert_eq!(db.song_for_lyrics("canonical").unwrap().unwrap(), SongLookup { name: "Song".into(), artist_name: "Artist".into(), album_name: "Album".into(), duration_ms: 200000 });
+        db.save_lyrics("canonical", None, None).unwrap();
+        assert!(db.lyrics("canonical").unwrap().is_some());
+        db.conn.execute("UPDATE lyrics SET fetched_at = datetime('now', '-2 days')", []).unwrap();
+        assert!(db.lyrics("canonical").unwrap().is_none());
+    }
+
+    #[test]
+    fn canonical_migrations_preserve_existing_provider_cache_and_duplicate_entries() {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in MIGRATIONS.iter().take(4) { conn.execute_batch(sql).unwrap(); }
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute_batch("INSERT INTO songs(id,name,artist_name) VALUES('legacy-song','Original title','Original artist'); INSERT INTO playlists(id,name) VALUES('legacy-list','Original playlist'); INSERT INTO playlist_tracks(playlist_id,position,song_id) VALUES('legacy-list',0,'legacy-song'),('legacy-list',1,'legacy-song');").unwrap();
+        let mut db = Db::init(conn).unwrap();
+        let rows = db.playlist_songs("legacy-list").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "Original title");
+        assert_eq!(rows[1].id, "legacy-song");
+        let entry_count: i64 = db.conn.query_row("SELECT COUNT(DISTINCT entry_id) FROM playlist_tracks WHERE playlist_id='legacy-list'", [], |r|r.get(0)).unwrap();
+        assert_eq!(entry_count, 2);
+        db.migrate().unwrap();
+        assert_eq!(db.playlists().unwrap()[0].name, "Original playlist");
+        let version: usize = db.conn.pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();
+        assert_eq!(version, MIGRATIONS.len());
+    }
     use crate::settings::Source;
 
     fn song(id: &str, name: &str, artist: &str) -> SongUpsert {

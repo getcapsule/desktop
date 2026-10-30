@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-spotify-status"
+description = "Enables the spotify_status command without any pre-configured scope."
+commands.allow = ["spotify_status"]
+
+[[permission]]
+identifier = "deny-spotify-status"
+description = "Denies the spotify_status command without any pre-configured scope."
+commands.deny = ["spotify_status"]

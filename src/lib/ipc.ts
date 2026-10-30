@@ -19,6 +19,7 @@ export interface Settings {
   onboarded: boolean
   developer: boolean
   appearance: { glass: string; theme: string }
+  spotify: { client_id: string }
   navidrome: { url: string; username: string }
   local: { folders: string[] }
   lyrics: { offset_ms: number }
@@ -60,6 +61,8 @@ export interface LyricsResult {
 }
 
 export interface PlayerState {
+  imported_queue?: boolean
+  playback_source?: 'local' | 'navidrome' | 'youtube' | null
   status: Status
   queue: Track[]
   index: number | null
@@ -90,9 +93,17 @@ export const player = {
   cycleRepeat: () => invoke<void>('player_cycle_repeat'),
 }
 
-export const auth = {
-  status: () => invoke<AuthStatus>('auth_status'),
-  showLogin: () => invoke<void>('auth_show_login'),
+export interface SpotifyStatus {
+  configured: boolean
+  authenticated: boolean
+  display_name: string | null
+  playback_supported: boolean
+}
+
+export const spotify = {
+  status: () => invoke<SpotifyStatus>('spotify_status'),
+  connect: (clientId: string) => invoke<void>('spotify_connect', { clientId }),
+  disconnect: () => invoke<void>('spotify_disconnect'),
 }
 
 export interface NavidromeStatus {
@@ -181,8 +192,8 @@ export const library = {
   playPlaylist: (playlistId: string) => invoke<void>('play_playlist', { playlistId }),
 }
 
-export function artworkUrl(id: string, size = 96): string {
-  return `${convertFileSrc(id, 'artwork')}?w=${size}`
+export function artworkUrl(id: string, size = 96, revision?: number): string {
+  return `${convertFileSrc(id, 'artwork')}?w=${size}${revision === undefined ? '' : `&v=${revision}`}`
 }
 
 export const dev = {
@@ -192,11 +203,8 @@ export const dev = {
 
 type Events = {
   'player://state': PlayerState
-  'auth://authenticated': null
-  'auth://login-required': null
-  'auth://lost': null
-  'engine://ready': null
-  'engine://unavailable': string
+  'spotify://changed': SpotifyStatus
+  'spotify://error': string
   'library://progress': SyncProgress
   'library://updated': LibraryCounts
   'library://failed': SyncFailed

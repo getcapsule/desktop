@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-job"
+description = "Enables the import_job command without any pre-configured scope."
+commands.allow = ["import_job"]
+
+[[permission]]
+identifier = "deny-import-job"
+description = "Denies the import_job command without any pre-configured scope."
+commands.deny = ["import_job"]

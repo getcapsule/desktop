@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-import-set-playback-settings"
+description = "Enables the import_set_playback_settings command without any pre-configured scope."
+commands.allow = ["import_set_playback_settings"]
+
+[[permission]]
+identifier = "deny-import-set-playback-settings"
+description = "Denies the import_set_playback_settings command without any pre-configured scope."
+commands.deny = ["import_set_playback_settings"]

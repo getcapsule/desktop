@@ -32,6 +32,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
+uuid = { version = "1", features = ["v4"] }
+icu_normalizer = { version = "2.2", default-features = false, features = ["compiled_data"] }
 # Mandated by the Subsonic protocol: auth is md5(password + salt), computed per
 # request and compared server-side. Not a security choice of ours.
 md5 = "0.7"
