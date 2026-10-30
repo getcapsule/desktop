@@ -11,45 +11,17 @@ on:
         type: string
         default: v0.5.0
 
-permissions:
-  contents: read
-
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
-  prepare:
-    name: Prepare release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
-    outputs:
-      id: ${{ steps.release.outputs.id }}
-      tag: ${{ steps.release.outputs.tag }}
-      version: ${{ steps.release.outputs.version }}
-      source_sha: ${{ steps.release.outputs.source_sha }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
-      - name: Validate version and create one shared draft
-        id: release
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const release = require('./scripts/release.cjs');
-            await release.prepareRelease({ github, context, core });
-
   build:
-    name: Build (${{ matrix.platform }})
-    needs: prepare
     permissions:
       contents: write
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - platform: windows-latest
@@ -60,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
       - name: Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -82,43 +54,22 @@ jobs:
         with:
           workspaces: src-tauri -> target
       - run: bun install --frozen-lockfile
-      - name: Build and upload installers to the shared release
+      - name: Build installers and publish the release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          releaseId: ${{ needs.prepare.outputs.id }}
-          tagName: ${{ needs.prepare.outputs.tag }}
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: capsule ${{ inputs.tag || github.ref_name }}
           args: ${{ matrix.args }}
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
-      - name: Save installers as workflow artifacts
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: installers-${{ matrix.platform }}
-          if-no-files-found: error
-          path: |
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/appimage/*.AppImage
+          releaseBody: |
+            ## Downloads
 
-  publish:
-    name: Verify installers and publish as latest
-    needs: [prepare, build]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      RELEASE_ID: ${{ needs.prepare.outputs.id }}
-      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.prepare.outputs.source_sha }}
-      - uses: actions/github-script@v9
-        with:
-          script: |
-            const release = require('./scripts/release.cjs');
-            await release.publishRelease({ github, context, core });
+            **Windows:** use the `.exe` installer. The build is unsigned.
+
+            **Linux:** use the `.deb` or `.AppImage` package.
+
+            Local files, Navidrome, public YouTube playback, and SoundCloud are supported.
+            Acrylic and mica window materials are Windows-only.
