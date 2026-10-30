@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discover-album-tracks"
+description = "Enables the discover_album_tracks command without any pre-configured scope."
+commands.allow = ["discover_album_tracks"]
+
+[[permission]]
+identifier = "deny-discover-album-tracks"
+description = "Denies the discover_album_tracks command without any pre-configured scope."
+commands.deny = ["discover_album_tracks"]
