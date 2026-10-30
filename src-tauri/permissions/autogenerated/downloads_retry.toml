@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-downloads-retry"
+description = "Enables the downloads_retry command without any pre-configured scope."
+commands.allow = ["downloads_retry"]
+
+[[permission]]
+identifier = "deny-downloads-retry"
+description = "Denies the downloads_retry command without any pre-configured scope."
+commands.deny = ["downloads_retry"]
