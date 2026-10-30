@@ -1,131 +1,75 @@
 @import 'tailwindcss';
 
-/* ── Typefaces ────────────────────────────────────────────────────────────
-   Bundled, never fetched the app must render identically offline.
-   The split is the system: Instrument Sans for anything a human wrote,
-   Martian Mono for anything a machine measured. You learn to read the mono
-   as "this is a fact about the system". */
+/* Local fonts keep the interface available offline. */
 @font-face {
   font-family: 'Instrument Sans';
   src: url('./assets/fonts/InstrumentSans-latin.woff2') format('woff2');
   font-weight: 400 700;
   font-style: normal;
-  font-display: block;
+  font-display: swap;
 }
 @font-face {
   font-family: 'Martian Mono';
   src: url('./assets/fonts/MartianMono-latin.woff2') format('woff2');
   font-weight: 400 700;
   font-style: normal;
-  font-display: block;
+  font-display: swap;
 }
 
 @theme {
   --color-ground: #0d1014;
   --color-panel: #151a1f;
   --color-rule: #242c35;
-  /* Tuned for a window that stays open all day: nothing here glares. Pure-white
-     ink on near-black measured 15.8:1, which is the main source of eye strain at
-     13px it sits at 12.6:1 now. Hues are unchanged; only intensity dropped.
-     Every value still clears WCAG AA (4.5:1) on both ground and panel. */
   --color-ink: #ccd3db;
   --color-muted: #78848f;
-  /* Muted, nudged 18% toward ink. Plain muted drops to 4.28:1 on a playing row
-     and 3.75:1 on an active pill both under AA. Measured, not guessed:
-     5.17 / 4.52 / 6.02 on playing row, pill and ground. */
   --color-muted2: #87929d;
   --color-accent: #9c8fc0;
   --color-ok: #62a688;
   --color-warn: #c09a5f;
   --color-crit: #c66d60;
-
   --font-sans: 'Instrument Sans', system-ui, sans-serif;
   --font-mono: 'Martian Mono', ui-monospace, monospace;
-
-  /* Density: a tool kept open all day, not a page you land on. */
   --spacing-row: 40px;
 }
 
-html,
-body,
-#root {
-  height: 100%;
-}
-
 :root {
+  color-scheme: var(--theme-color-scheme, dark);
   --surface-ground: var(--color-ground);
   --surface-panel: var(--color-panel);
-  /* The well sits below the chrome. Two elevations is what reads as glass; a
-     single flat plane reads as a dark webpage no matter how translucent it is. */
   --surface-well: var(--color-ground);
-  /* The catch of light along a raised glass edge. Off in solid mode, where
-     there is no depth to catch it. */
-  --glass-edge: none;
   --edge-tint: 255, 255, 255;
-  --radius-surface: 10px;
-  --radius-row: 6px;
+  --radius-surface: 20px;
+  --radius-row: 8px;
+  /* Derived from the public theme tokens: imported themes recolor everything. */
+  --glass-line: color-mix(in srgb, var(--color-ink) 13%, transparent);
+  --glass-highlight: rgba(var(--edge-tint), 0.10);
+  --glass-shadow: 0 4px 16px color-mix(in srgb, var(--color-ground) 18%, transparent);
+  --control-surface: color-mix(in srgb, var(--color-ink) 4%, var(--color-panel));
+  --glass-fill: var(--surface-panel);
+  --transport-fill: var(--surface-panel);
+  --glass-rim: color-mix(in srgb, var(--color-ink) 26%, transparent);
+  --glass-specular: color-mix(in srgb, oklch(0.98 0.006 260) 38%, transparent);
+  --glass-muted: color-mix(in srgb, var(--color-muted2) 85%, var(--color-ink));
 }
-
-/* Chrome is glass; the tracklist is lightly translucent enough for colour to
-   bleed through, opaque enough that dense 13px rows stay readable. The tracklist
-   alpha is the one knob that matters; adjust --list-opacity to taste. */
 :root[data-glass='acrylic-chrome'] {
   --surface-ground: transparent;
-  --surface-panel: color-mix(in srgb, var(--color-panel) 72%, transparent);
-  --list-opacity: 78%;
-  --surface-well: color-mix(in srgb, var(--color-ground) var(--list-opacity), transparent);
-  --glass-edge: inset 0 1px 0 rgba(var(--edge-tint), 0.055);
+  --surface-panel: color-mix(in srgb, var(--color-panel) 64%, transparent);
+  --transport-fill: color-mix(in srgb, var(--color-panel) 58%, transparent);
+  --surface-well: var(--color-ground);
 }
-
-/* Windows 11 Mica tints the whole window subtly from the wallpaper. */
 :root[data-glass='mica'] {
   --surface-ground: transparent;
-  --surface-panel: color-mix(in srgb, var(--color-panel) 60%, transparent);
-  --surface-well: color-mix(in srgb, var(--color-ground) 58%, transparent);
-  --glass-edge: inset 0 1px 0 rgba(var(--edge-tint), 0.05);
+  --surface-panel: color-mix(in srgb, var(--color-panel) 78%, transparent);
+  --transport-fill: color-mix(in srgb, var(--color-panel) 72%, transparent);
+  --surface-well: color-mix(in srgb, var(--color-ground) 94%, transparent);
 }
-
-/* Glass everywhere, including the track list. */
 :root[data-glass='acrylic-all'] {
   --surface-ground: transparent;
-  --surface-panel: color-mix(in srgb, var(--color-panel) 55%, transparent);
-  --surface-well: color-mix(in srgb, var(--color-ground) 46%, transparent);
-  --glass-edge: inset 0 1px 0 rgba(var(--edge-tint), 0.06);
+  --surface-panel: color-mix(in srgb, var(--color-panel) 64%, transparent);
+  --transport-fill: color-mix(in srgb, var(--color-panel) 58%, transparent);
+  --surface-well: color-mix(in srgb, var(--color-ground) 76%, transparent);
 }
-
-.content-surface {
-  background: var(--surface-well);
-}
-
-/* Raised chrome: header, sidebar, transport. The highlight is the whole tell
-   1px of caught light along the top edge, nothing more. */
-.chrome {
-  background: var(--surface-panel);
-  box-shadow: var(--glass-edge);
-}
-
-/* Rows carry their own shape instead of a hairline each. At 300+ tracks the
-   stacked rules were the loudest thing in the window. */
-.row {
-  border-radius: var(--radius-row);
-  transition: background-color 120ms ease-out;
-}
-.row:hover {
-  background: color-mix(in srgb, var(--color-ink) 5%, transparent);
-}
-.row[data-playing='true'] {
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-}
-/* Raised surfaces lift the background under dim text, so dim text lifts too. */
-.row[data-playing='true'] .text-muted,
-.card-on .text-muted,
-.tab-on .text-muted {
-  color: var(--color-muted2);
-}
-.row[data-playing='true']:hover {
-  background: color-mix(in srgb, var(--color-accent) 16%, transparent);
-}
-
+html, body, #root { height: 100%; }
 body {
   margin: 0;
   background: var(--surface-ground);
@@ -137,113 +81,199 @@ body {
   user-select: none;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
 }
+button, input[type='text'], input[type='search'], input[type='password'], select, textarea { border-radius: 9px; }
+button { cursor: pointer; }
+button:disabled { cursor: default; }
+button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+input[type='checkbox'] { accent-color: var(--color-accent); }
+input::placeholder, textarea::placeholder { color: var(--color-muted); }
+select { color: var(--color-ink); background-color: var(--color-panel); }
+option { color: var(--color-ink); background: var(--color-panel); }
 
+.app-shell {
+  /* Still light: fixed CSS color fields, with no image decoding or animation.
+     They give the glass something to transmit even over an opaque desktop. */
+  background:
+    radial-gradient(ellipse at 0% 30%, color-mix(in srgb, var(--color-accent) 45%, transparent), transparent 42%),
+    radial-gradient(ellipse at 80% 110%, color-mix(in srgb, var(--color-accent) 26%, transparent), transparent 50%),
+    radial-gradient(ellipse at 5% 100%, color-mix(in srgb, var(--color-ok) 24%, transparent), transparent 38%);
+}
+:root[data-glass='none'] .app-shell { background: none; }
+.app-titlebar { height: 64px; padding-left: 28px; }
+.app-brand { display: flex; align-items: center; gap: 10px; flex: 0 0 170px; font-size: 19px; font-weight: 650; letter-spacing: -0.045em; }
+.brand-mark {
+  display: inline-block;
+  width: 13px;
+  height: 23px;
+  border: 1.5px solid var(--color-accent);
+  border-radius: 20px;
+  background: linear-gradient(180deg, var(--color-accent) 49%, transparent 50%);
+  transform: rotate(35deg);
+  pointer-events: none;
+}
+.library-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(440px, 48vw);
+  min-width: 180px;
+  height: 35px;
+  padding: 0 12px;
+  border: 1px solid var(--glass-line);
+  border-radius: 30px;
+  color: var(--glass-muted);
+  background: linear-gradient(170deg, color-mix(in srgb, var(--color-ink) 4%, transparent), transparent 65%), var(--glass-fill);
+  border-color: var(--glass-rim);
+  border-top-color: var(--glass-specular);
+  box-shadow: inset 0 1px 1px color-mix(in srgb, var(--glass-specular) 40%, transparent), inset 0 -1px 1px var(--glass-line), 0 4px 12px color-mix(in srgb, var(--color-ground) 12%, transparent);
+}
+.library-search:focus-within { border-color: var(--color-accent); }
+.library-search input { height: 100%; border-radius: 0; outline: none; }
+.library-search input::placeholder, .library-search .text-muted { color: var(--glass-muted); }
+.search-shortcut { padding: 2px 5px; font-size: 10px; white-space: nowrap; }
+.source-badge { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--color-muted); white-space: nowrap; }
+.source-badge > span { width: 5px; height: 5px; border-radius: 50%; background: var(--color-ok); }
+.app-body { gap: 12px; padding: 0 14px; }
 
-button,
-input[type='text'],
-input[type='search'] {
-  border-radius: 8px;
+/* Native Acrylic/Mica supplies desktop frost. CSS backdrop filters caused
+   excessive WebView GPU allocations in the transparent native window, so
+   internal glass uses color transmission, reflected rims, and inset edges. */
+.chrome {
+  background: linear-gradient(155deg, color-mix(in srgb, var(--color-ink) 4%, transparent), transparent 30%, color-mix(in srgb, var(--color-ink) 2%, transparent)), var(--glass-fill);
+  border: 1px solid var(--glass-rim);
+  border-top-color: var(--glass-specular);
+  box-shadow: inset 1px 1px 1px color-mix(in srgb, var(--glass-specular) 38%, transparent), inset 0 -1px 1px var(--glass-line), 0 8px 24px color-mix(in srgb, var(--color-ground) 22%, transparent);
 }
+.sidebar { width: 190px; padding: 14px 0 12px; border-radius: var(--radius-surface); overflow: hidden; }
+.sidebar-links > *, .sidebar-bottom { flex-shrink: 0; }
+.sidebar .label { padding-left: 20px; font-family: var(--font-sans); font-size: 10px; font-weight: 550; letter-spacing: 0.04em; text-transform: none; }
+.nav-item { min-height: 33px; gap: 11px; padding: 6px 11px; border: 1px solid transparent; border-radius: 11px; font-size: 12px; }
+.nav-item > svg { flex-shrink: 0; opacity: 0.85; }
+.nav-item-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: 1; min-width: 0; white-space: nowrap; }
+.nav-item.tab-on {
+  color: var(--color-ink);
+  background: linear-gradient(165deg, color-mix(in srgb, var(--color-ink) 10%, transparent), color-mix(in srgb, var(--color-ink) 5%, transparent));
+  border-color: var(--glass-rim);
+  border-top-color: var(--glass-specular);
+  box-shadow: inset 0 1px 1px color-mix(in srgb, var(--glass-specular) 45%, transparent), 0 3px 6px color-mix(in srgb, var(--color-ground) 14%, transparent);
+}
+.nav-item.tab-on > svg { color: var(--color-accent); opacity: 1; }
+.nav-item .data { font-family: var(--font-sans); font-size: 10px; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+.sidebar-bottom { padding-top: 10px; }
+.sidebar-bottom > .nav-item { width: calc(100% - 16px); }
+.sync-button { border-radius: 10px; }
+.workspace { overflow: hidden; border: 1px solid var(--glass-line); border-radius: var(--radius-surface); }
+.content-surface { background: var(--surface-well); }
+/* All-glass content needs the stronger text token over a changing desktop. */
+:root[data-glass='acrylic-all'] .content-surface .text-muted,
+:root[data-glass='acrylic-all'] .content-surface .label { color: var(--color-ink); }
+.workspace-heading { display: flex; justify-content: space-between; align-items: end; gap: 16px; padding: 24px 26px 16px; }
+.workspace-heading .label { font-family: var(--font-sans); font-size: 11px; letter-spacing: 0; text-transform: none; }
+.workspace-heading h1 { margin: 4px 0 0; font-size: 27px; line-height: 1.2; font-weight: 600; letter-spacing: -0.04em; }
+.workspace-caption { max-width: 40%; font-size: 11px; color: var(--color-muted); text-align: right; }
+.library-sort { min-height: 48px; margin: 0 16px 7px; padding: 0 10px 10px; border-bottom: 1px solid var(--color-rule); }
+.library-sort select { background: var(--control-surface); border-color: var(--glass-line); border-radius: 8px; }
+.choice-card { border-radius: 13px; }
+.dialog-scrim { background: color-mix(in srgb, var(--color-ground) 70%, transparent); }
+.glass-dialog {
+  border: 1px solid var(--glass-rim);
+  border-radius: 20px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--color-ink) 3%, transparent), transparent 60%), var(--color-panel);
+  box-shadow: inset 0 1px 0 var(--glass-highlight), 0 20px 60px color-mix(in srgb, var(--color-ground) 40%, transparent);
+}
+/* Rust derives muted2 against raised surfaces. The base muted token only
+   guarantees contrast against the unlit ground/panel colors. */
+.chrome .text-muted, .chrome .label,
+.glass-dialog .text-muted, .glass-dialog .label, .glass-dialog [cmdk-group-heading],
+.glass-dialog input::placeholder { color: var(--glass-muted); }
 
+/* Fixed row height is shared with VirtualList's geometry. */
+.row { border-radius: var(--radius-row); transition: background-color 140ms ease-out; }
+.row:hover { background: color-mix(in srgb, var(--color-ink) 5%, transparent); }
+.row[data-playing='true'] { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.row[data-playing='true']:hover { background: color-mix(in srgb, var(--color-accent) 16%, transparent); }
+.row[data-playing='true'] .text-muted, .card-on .text-muted, .tab-on .text-muted { color: var(--color-muted2); }
+.chrome .tab-on .text-muted { color: var(--color-ink); }
+.track-art { box-shadow: 0 1px 3px color-mix(in srgb, var(--color-ground) 12%, transparent); }
+.data { font-family: var(--font-mono); font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+.label { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.10em; text-transform: uppercase; color: var(--color-muted); }
 
-.data {
-  font-family: var(--font-mono);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.04em;
+.transport {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) minmax(280px, 1.5fr) minmax(130px, 1fr);
+  align-items: center;
+  flex-shrink: 0;
+  gap: 24px;
+  margin: 12px 14px 0;
+  padding: 12px 20px;
+  border-radius: 22px;
+  background: linear-gradient(165deg, color-mix(in srgb, var(--color-ink) 5%, transparent), transparent 40%, color-mix(in srgb, var(--color-ink) 2%, transparent)), var(--transport-fill);
 }
-
-.label {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--color-muted);
-}
-
-::-webkit-scrollbar {
-  width: 10px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: var(--color-rule);
-}
-::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--color-rule) 80%, var(--color-ink));
-}
-
+.transport-track { display: flex; align-items: center; gap: 13px; min-width: 0; }
+.transport-art { display: grid; place-items: center; width: 48px; height: 48px; flex-shrink: 0; overflow: hidden; border: 1px solid var(--glass-line); border-radius: 11px; background: var(--color-ground); color: var(--color-muted); }
+.transport-art img { width: 100%; height: 100%; object-fit: cover; }
+.transport-center { min-width: 0; }
+.transport-buttons { display: flex; align-items: center; justify-content: center; gap: 13px; }
+.transport-control { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; color: var(--glass-muted); transition: color 140ms ease-out, background-color 140ms ease-out; }
+.transport-control:hover { color: var(--color-ink); background: color-mix(in srgb, var(--color-ink) 6%, transparent); }
+.transport-control:disabled { opacity: 0.35; }
+.transport-toggle[aria-pressed='true'] { color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.transport-play { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid var(--glass-rim); border-top-color: var(--glass-specular); border-radius: 50%; background: linear-gradient(145deg, color-mix(in srgb, var(--color-ink) 16%, transparent), color-mix(in srgb, var(--color-ink) 5%, transparent)); color: var(--color-ink); box-shadow: inset 1px 1px 1px color-mix(in srgb, var(--glass-specular) 60%, transparent), inset 0 -1px 1px var(--glass-line), 0 3px 7px color-mix(in srgb, var(--color-ground) 24%, transparent); transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1); }
+.transport-play:active:not(:disabled) { transform: scale(0.94); }
+.transport-play:disabled { opacity: 0.35; }
+.transport-progress { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+.transport-progress .data { width: 34px; flex-shrink: 0; font-size: 9px; text-align: center; }
+.transport-progress input { flex: 1; min-width: 0; }
+.transport-volume { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.transport-volume input { width: 88px; }
+.readout { min-height: 27px; padding: 6px 20px; border: 0; background: transparent; font-size: 8px; letter-spacing: 0.07em; }
 
 input[type='range'] {
   appearance: none;
-  height: 3px;
+  height: 4px;
   cursor: pointer;
-  border-radius: 2px;
-  /* Transport.tsx sets --fill (0-100) as the played fraction; without this the
-     track has no background at all and the control renders invisible. */
-  background: linear-gradient(
-    to right,
-    var(--color-ink) calc(var(--fill, 0) * 1%),
-    var(--color-rule) 0
-  );
+  border-radius: 5px;
+  background: linear-gradient(to right, var(--color-ink) calc(var(--fill, 0) * 1%), var(--color-rule) 0);
 }
-input[type='range']::-webkit-slider-thumb {
-  appearance: none;
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background: var(--color-ink);
-  margin-top: -4px;
-  transition: background 120ms ease-out;
-}
+input[type='range']::-webkit-slider-thumb { appearance: none; width: 10px; height: 10px; border-radius: 50%; background: var(--color-ink); }
+input[type='range']::-moz-range-thumb { width: 10px; height: 10px; border: 0; border-radius: 50%; background: var(--color-ink); }
+input[type='range']:disabled { opacity: 0.45; cursor: default; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 8px; background: var(--color-rule); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background-color: var(--color-muted); }
+@keyframes value-in { from { opacity: 0.5; } to { opacity: 1; } }
+.value-change { animation: value-in 180ms ease-out; }
 
-input[type='range']:disabled {
-  opacity: 0.5;
-  cursor: default;
+@media (max-width: 960px) {
+  .app-brand { flex-basis: 153px; }
+  .app-titlebar { padding-left: 23px; gap: 10px; }
+  .sidebar { width: 174px; }
+  .source-badge { font-size: 10px; }
+  .transport { gap: 15px; padding: 12px 16px; grid-template-columns: minmax(160px, 1fr) minmax(250px, 1.5fr) 115px; }
+  .transport-volume input { width: 78px; }
+  .workspace-heading { padding: 20px 22px 12px; }
 }
-
-
-/* The player bar is lit from behind by whatever is playing: the artwork itself,
-   scaled up and blurred past recognition, so the glass takes its colour from the
-   music rather than from a fixed accent. Kept at low alpha and desaturated
-   this window stays open all day and the tint must read as warmth, not colour. */
-.backlight {
-  position: absolute;
-  inset: -60% -10%;
-  background-size: cover;
-  background-position: center;
-  filter: blur(52px) saturate(0.85);
-  opacity: 0.22;
-  pointer-events: none;
-  transition: opacity 400ms ease-out;
+@media (max-height: 650px) {
+  .app-titlebar { height: 54px; }
+  .sidebar { padding-top: 6px; }
+  .sidebar .nav-item { min-height: 30px; padding-top: 5px; padding-bottom: 5px; }
+  .sidebar-links > .label { padding-top: 10px; }
+  .sidebar-bottom { padding-top: 10px; }
+  .workspace-heading { padding-top: 16px; padding-bottom: 10px; }
 }
-.backlight::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(to bottom, transparent, var(--color-ground) 88%);
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-glass] { --surface-ground: var(--color-ground); --surface-panel: var(--color-panel); --surface-well: var(--color-ground); }
+  .chrome, .transport, .library-search { background: var(--color-panel); backdrop-filter: none; }
+  .app-shell { background: none; }
 }
-
-@keyframes value-in {
-  from {
-    opacity: 0.35;
-  }
-  to {
-    opacity: 1;
-  }
+@media (prefers-contrast: more) {
+  :root { --glass-line: var(--color-muted); }
+  .text-muted { color: var(--color-muted2); }
 }
-.value-change {
-  animation: value-in 180ms ease-out;
-}
-
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-  }
+  *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
 }

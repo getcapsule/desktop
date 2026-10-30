@@ -15,7 +15,7 @@ export function WindowControls() {
   }, [win])
 
   return (
-    <div className="flex items-center">
+    <div className="window-controls flex items-center self-start">
       <Ctl label="Minimize" onClick={() => void win.minimize()}>
         <svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
           <line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" strokeWidth="1" />
@@ -59,7 +59,7 @@ function Ctl({
       aria-label={label}
       onClick={onClick}
       className={`grid h-11 w-11 place-items-center rounded-none text-muted transition-colors hover:text-ink ${
-        close ? 'hover:!bg-[#e2705e] hover:!text-white' : 'hover:bg-white/8'
+        close ? 'hover:!bg-crit hover:!text-ground' : 'hover:bg-ink/8'
       }`}
     >
       {children}
