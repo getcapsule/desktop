@@ -31,6 +31,7 @@ export interface Settings {
 export const settings = {
   get: () => invoke<Settings>('settings_get'),
   set: (next: Settings) => invoke<void>('settings_set', { settings: next }),
+  setLyricsOffset: (offsetMs: number) => invoke<number>('lyrics_set_offset', { offsetMs }),
 }
 
 export interface ThemeFailure {
@@ -207,6 +208,7 @@ export const library = {
     invoke<SongRow[]>('library_playlist_songs', { playlistId }),
   search: (query: string, limit = 100) => invoke<SongRow[]>('library_search', { query, limit }),
   lyrics: (trackId: string) => invoke<LyricsResult>('lyrics_for', { trackId }),
+  refreshLyrics: (trackId: string) => invoke<LyricsResult>('lyrics_refresh', { trackId }),
   counts: () => invoke<LibraryCounts>('library_counts'),
   sync: () => invoke<void>('library_sync'),
   play: (songs: SongRow[], startIndex = 0) =>

@@ -610,7 +610,7 @@ impl Db {
     pub fn lyrics(&self, track_id: &str) -> Result<Option<(Option<String>, Option<String>)>, DbError> {
         let row = self
             .conn
-            .query_row("SELECT synced, plain FROM lyrics WHERE track_id = ?1", params![track_id], |r| {
+            .query_row("SELECT synced, plain FROM lyrics WHERE track_id = ?1 AND (synced IS NOT NULL OR plain IS NOT NULL OR fetched_at > datetime('now', '-1 day'))", params![track_id], |r| {
                 Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<String>>(1)?))
             })
             .optional()?;
@@ -635,6 +635,14 @@ impl Db {
     }
 
     pub fn song_for_lyrics(&self, catalog_id: &str) -> Result<Option<SongLookup>, DbError> {
+        if let Some(track) = self.canonical_track(catalog_id)? {
+            return Ok(Some(SongLookup {
+                name: track.metadata.title,
+                artist_name: track.metadata.artists.first().cloned().unwrap_or_default(),
+                album_name: track.metadata.album.unwrap_or_default(),
+                duration_ms: track.metadata.duration_ms.unwrap_or(0),
+            }));
+        }
         let row = self
             .conn
             .query_row(

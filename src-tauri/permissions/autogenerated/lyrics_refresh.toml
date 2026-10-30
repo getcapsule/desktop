@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lyrics-refresh"
+description = "Enables the lyrics_refresh command without any pre-configured scope."
+commands.allow = ["lyrics_refresh"]
+
+[[permission]]
+identifier = "deny-lyrics-refresh"
+description = "Denies the lyrics_refresh command without any pre-configured scope."
+commands.deny = ["lyrics_refresh"]

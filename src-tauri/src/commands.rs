@@ -712,48 +712,143 @@ pub struct Lyrics {
 
 #[tauri::command]
 pub async fn lyrics_for(app: AppHandle, track_id: String) -> Result<Lyrics, String> {
-    let state = app.state::<AppState>();
+    lookup_lyrics(app, track_id, false).await
+}
 
-    let cached = {
-        let db = state.db.lock().expect("db mutex");
-        db.lyrics(&track_id).map_err(db_err)?
+#[tauri::command]
+pub async fn lyrics_refresh(app: AppHandle, track_id: String) -> Result<Lyrics, String> {
+    lookup_lyrics(app, track_id, true).await
+}
+
+#[tauri::command]
+pub fn lyrics_set_offset(state: State<'_, AppState>, offset_ms: i64) -> Result<i64, String> {
+    let dir = state
+        .data_dir
+        .lock()
+        .expect("data dir mutex")
+        .clone()
+        .ok_or("no data directory; settings cannot be saved")?;
+    let mut selected = state.settings.lock().expect("settings mutex");
+    let mut updated = selected.clone();
+    updated.lyrics.offset_ms = offset_ms.clamp(-5_000, 5_000);
+    crate::settings::save(&dir, &updated).map_err(|e| e.to_string())?;
+    *selected = updated;
+    Ok(selected.lyrics.offset_ms)
+}
+
+async fn lookup_lyrics(app: AppHandle, track_id: String, refresh: bool) -> Result<Lyrics, String> {
+    // Same-track lookups share a gate and recheck the cache after acquiring it.
+    type Gate = std::sync::Arc<tokio::sync::Mutex<()>>;
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(3);
+    let gate: Gate = {
+        let mut gates = GATES
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| "lyrics unavailable")?;
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        let gate = gates
+            .get(&track_id)
+            .and_then(|g| g.upgrade())
+            .unwrap_or_else(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+        gates.insert(track_id.clone(), std::sync::Arc::downgrade(&gate));
+        gate
+    };
+    let _guard = gate.lock().await;
+    let state = app.state::<AppState>();
+    let imports = app.try_state::<crate::import::State>();
+    let canonical = imports
+        .as_ref()
+        .map(|imports| {
+            imports
+                .db
+                .lock()
+                .expect("import db mutex")
+                .song_for_lyrics(&track_id)
+        })
+        .transpose()
+        .map_err(db_err)?
+        .flatten();
+    let song = match canonical {
+        Some(song) => Some(song),
+        None => state
+            .db
+            .lock()
+            .expect("db mutex")
+            .song_for_lyrics(&track_id)
+            .map_err(db_err)?,
+    };
+    // A single stable cache owner survives provider database switching.
+    let cached = if refresh {
+        None
+    } else if let Some(imports) = imports.as_ref() {
+        imports
+            .db
+            .lock()
+            .expect("import db mutex")
+            .lyrics(&track_id)
+            .map_err(db_err)?
+    } else {
+        state
+            .db
+            .lock()
+            .expect("db mutex")
+            .lyrics(&track_id)
+            .map_err(db_err)?
     };
     if let Some((synced, plain)) = cached {
-        let lines = synced.as_deref().map(crate::lyrics::parse_lrc).unwrap_or_default();
-        return Ok(Lyrics { lines, plain });
+        return Ok(Lyrics {
+            lines: synced
+                .as_deref()
+                .map(crate::lyrics::parse_lrc)
+                .unwrap_or_default(),
+            plain,
+        });
     }
-
-    let Some(song) = ({
-        let db = state.db.lock().expect("db mutex");
-        db.song_for_lyrics(&track_id).map_err(db_err)?
-    }) else {
-        tracing::warn!(track = %track_id, "no library row for this track; cannot look up lyrics");
-        return Ok(Lyrics { lines: Vec::new(), plain: None });
+    let Some(song) = song else {
+        return Ok(Lyrics {
+            lines: Vec::new(),
+            plain: None,
+        });
     };
-
-    let fetched = match crate::lyrics::fetch(&song).await {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(error = %e, track = %track_id, "lyrics lookup failed");
-            return Ok(Lyrics { lines: Vec::new(), plain: None });
-        }
-    };
-    tracing::debug!(
-        synced = fetched.synced.is_some(),
-        plain = fetched.plain.is_some(),
-        "lyrics fetched"
-    );
-
-    {
-        let db = state.db.lock().expect("db mutex");
-        if let Err(e) = db.save_lyrics(&track_id, fetched.synced.as_deref(), fetched.plain.as_deref())
-        {
-            tracing::warn!(error = %e, "could not cache lyrics");
-        }
+    let _slot = SLOTS.acquire().await.map_err(|_| "lyrics unavailable")?;
+    let fetched = crate::lyrics::fetch(&song).await.map_err(|_| {
+        tracing::warn!("lyrics lookup failed");
+        "Could not load lyrics. Please retry.".to_string()
+    })?;
+    if let Some(imports) = imports.as_ref() {
+        imports
+            .db
+            .lock()
+            .expect("import db mutex")
+            .save_lyrics(
+                &track_id,
+                fetched.synced.as_deref(),
+                fetched.plain.as_deref(),
+            )
+            .map_err(db_err)?;
+    } else {
+        state
+            .db
+            .lock()
+            .expect("db mutex")
+            .save_lyrics(
+                &track_id,
+                fetched.synced.as_deref(),
+                fetched.plain.as_deref(),
+            )
+            .map_err(db_err)?;
     }
-
     Ok(Lyrics {
-        lines: fetched.synced.as_deref().map(crate::lyrics::parse_lrc).unwrap_or_default(),
+        lines: fetched
+            .synced
+            .as_deref()
+            .map(crate::lyrics::parse_lrc)
+            .unwrap_or_default(),
         plain: fetched.plain,
     })
 }

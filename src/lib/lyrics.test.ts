@@ -92,3 +92,8 @@ describe('activeItem and gapProgress', () => {
     expect(gapProgress(intro, -5_000)).toBe(0)
   })
 })
+
+it('keeps the outro gap open until the actual end of the track', () => {
+  const items = timeline([sung(0, 'only')], 60000)
+  expect(items.at(-1)).toEqual({ kind: 'gap', at: 5000, until: 60000 })
+})

@@ -1,10 +1,4 @@
-/**
- * Lyric timing helpers.
- *
- * These mirror `lyrics::active_line` in Rust and run on every position tick, so
- * they live here rather than crossing IPC - a round trip per second for an
- * integer comparison would be absurd.
- */
+// Resolve lyric timing locally on each playback tick without an IPC round trip.
 import type { LyricLine } from './ipc'
 
 export function activeLine(lines: LyricLine[], positionMs: number): number | null {
@@ -59,8 +53,9 @@ export function timeline(lines: LyricLine[], durationMs: number): Item[] {
   const last = items[items.length - 1]
   if (last && last.kind === 'line' && last.until - last.at >= GAP_MIN_MS * 2) {
     const outro = last.at + GAP_MIN_MS
+    const end = last.until
     last.until = outro
-    items.push({ kind: 'gap', at: outro, until: last.until + GAP_MIN_MS })
+    items.push({ kind: 'gap', at: outro, until: end })
   }
 
   return items

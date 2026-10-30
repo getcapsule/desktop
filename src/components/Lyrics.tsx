@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-import { library, settings, type LyricLine, type PlayerState, type Settings } from '../lib/ipc'
+import { library, player, settings, type LyricLine, type PlayerState } from '../lib/ipc'
 import { activeItem, gapProgress, timeline } from '../lib/lyrics'
 
 export function Lyrics({ state }: { state: PlayerState | null }) {
@@ -8,31 +8,36 @@ export function Lyrics({ state }: { state: PlayerState | null }) {
   const [lines, setLines] = useState<LyricLine[]>([])
   const [plain, setPlain] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(false)
+  const [attempt, retry] = useState(0)
+  const lookupTrack = useRef<string | null>(null)
   const scroller = useRef<HTMLDivElement>(null)
   const [offset, setOffset] = useOffset()
 
   useEffect(() => {
-    if (!track) {
-      setLines([])
-      setPlain(null)
-      return
-    }
+    setLines([])
+    setPlain(null)
+    setError(false)
+    setLoading(false)
+    if (!track) return
     let cancelled = false
     setLoading(true)
-    void library
-      .lyrics(track.id)
+    const refresh = lookupTrack.current === track.id && attempt > 0
+    lookupTrack.current = track.id
+    void (refresh ? library.refreshLyrics(track.id) : library.lyrics(track.id))
       .then((r) => {
         if (cancelled) return
         setLines(r.lines)
         setPlain(r.plain)
       })
+      .catch(() => { if (!cancelled) setError(true) })
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
     return () => {
       cancelled = true
     }
-  }, [track?.id])
+  }, [track?.id, attempt])
 
   const items = useMemo(
     () => timeline(lines, track?.duration_ms ?? 0),
@@ -63,7 +68,7 @@ export function Lyrics({ state }: { state: PlayerState | null }) {
 
   if (!track) return <Centered>Nothing playing.</Centered>
   if (loading && items.length === 0 && !plain) return <Centered>Looking for lyrics…</Centered>
-  if (items.length === 0 && !plain) return <Centered>No lyrics for this track.</Centered>
+  if (error || (items.length === 0 && !plain)) return <Centered><span>{error ? 'Could not load lyrics.' : 'No lyrics for this track.'}</span><button className="ml-3 underline hover:text-ink" onClick={() => retry(n => n + 1)}>Retry</button></Centered>
 
   if (items.length === 0 && plain) {
     return (
@@ -87,13 +92,14 @@ export function Lyrics({ state }: { state: PlayerState | null }) {
                   on={i === active}
                 />
               ) : (
-                <p
-                  className={`text-[17px] leading-8 transition-colors duration-200 ${
+                <button
+                  onClick={() => { void player.seek(Math.min(track.duration_ms || Infinity, Math.max(0, item.at + offset))).catch(() => setError(true)) }}
+                  className={`block w-full text-left text-[17px] leading-8 transition-colors duration-200 ${
                     i === active ? 'font-semibold text-ink' : 'text-muted/55'
                   }`}
                 >
                   {item.text}
-                </p>
+                </button>
               )}
             </div>
           ))}
@@ -130,23 +136,22 @@ const TAP_MAX_MS = 2_000
 
 function useOffset(): [number, (next: number) => void] {
   const [offset, set] = useState(0)
-  const loaded = useRef<Settings | null>(null)
+  const edited = useRef(false)
+  const writes = useRef(Promise.resolve())
 
   useEffect(() => {
+    let cancelled = false
     void settings.get().then((s) => {
-      loaded.current = s
-      set(s.lyrics.offset_ms)
-    })
+      if (!cancelled && !edited.current) set(s.lyrics.offset_ms)
+    }).catch(() => {})
+    return () => { cancelled = true }
   }, [])
 
   const update = (next: number) => {
     const clamped = Math.round(Math.max(-OFFSET_LIMIT, Math.min(OFFSET_LIMIT, next)))
+    edited.current = true
     set(clamped)
-    const current = loaded.current
-    if (!current) return
-    const merged = { ...current, lyrics: { ...current.lyrics, offset_ms: clamped } }
-    loaded.current = merged
-    void settings.set(merged)
+    writes.current = writes.current.then(() => settings.setLyricsOffset(clamped)).then(() => {}, () => {})
   }
 
   return [offset, update]
