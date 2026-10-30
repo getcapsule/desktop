@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-qol-queue-remove"
+description = "Enables the qol_queue_remove command without any pre-configured scope."
+commands.allow = ["qol_queue_remove"]
+
+[[permission]]
+identifier = "deny-qol-queue-remove"
+description = "Denies the qol_queue_remove command without any pre-configured scope."
+commands.deny = ["qol_queue_remove"]

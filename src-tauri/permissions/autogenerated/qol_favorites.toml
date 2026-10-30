@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-qol-favorites"
+description = "Enables the qol_favorites command without any pre-configured scope."
+commands.allow = ["qol_favorites"]
+
+[[permission]]
+identifier = "deny-qol-favorites"
+description = "Denies the qol_favorites command without any pre-configured scope."
+commands.deny = ["qol_favorites"]

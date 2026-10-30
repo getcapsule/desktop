@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-qol-playlist-add"
+description = "Enables the qol_playlist_add command without any pre-configured scope."
+commands.allow = ["qol_playlist_add"]
+
+[[permission]]
+identifier = "deny-qol-playlist-add"
+description = "Denies the qol_playlist_add command without any pre-configured scope."
+commands.deny = ["qol_playlist_add"]

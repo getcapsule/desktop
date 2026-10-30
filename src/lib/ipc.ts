@@ -12,7 +12,8 @@ export interface Track {
   duration_ms: number
 }
 
-export type Source = 'apple' | 'spotify' | 'navidrome' | 'local'
+export type Source = 'youtube' | 'soundcloud' | 'navidrome' | 'local'
+export type SortDirection = 'asc' | 'desc'
 
 export interface Settings {
   source: Source
@@ -155,6 +156,27 @@ export interface PlaylistRow {
   artwork_url: string | null
 }
 
+export interface ArtistRow {
+  id?: string
+  name: string
+  artwork_url?: string | null
+  song_count: number
+  album_count: number
+}
+
+export interface SongQuery {
+  sort?: 'title' | 'artist' | 'album' | 'duration'
+  direction?: SortDirection
+  query?: string
+  artistName?: string
+}
+
+export interface AlbumQuery {
+  sort?: 'title' | 'artist'
+  direction?: SortDirection
+  artistName?: string
+}
+
 export interface LibraryCounts {
   songs: number
   albums: number
@@ -176,8 +198,9 @@ export interface SyncFailed {
 }
 
 export const library = {
-  songs: (limit = 500, offset = 0) => invoke<SongRow[]>('library_songs', { limit, offset }),
-  albums: (limit = 500, offset = 0) => invoke<AlbumRow[]>('library_albums', { limit, offset }),
+  songs: (limit = 500, offset = 0, options: SongQuery = {}) => invoke<SongRow[]>('library_songs', { limit, offset, ...options }),
+  albums: (limit = 500, offset = 0, options: AlbumQuery = {}) => invoke<AlbumRow[]>('library_albums', { limit, offset, ...options }),
+  artists: (limit = 500, offset = 0, options: { sort?: 'name'; direction?: SortDirection } = {}) => invoke<ArtistRow[]>('library_artists', { limit, offset, ...options }),
   playlists: () => invoke<PlaylistRow[]>('library_playlists'),
   albumSongs: (albumId: string) => invoke<SongRow[]>('library_album_songs', { albumId }),
   playlistSongs: (playlistId: string) =>

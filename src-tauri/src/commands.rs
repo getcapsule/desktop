@@ -499,50 +499,121 @@ fn db_err(e: crate::db::DbError) -> String {
 
 #[tauri::command]
 pub fn library_songs(
-    state: State<'_, AppState>,
+    app: AppHandle,
     limit: Option<u32>,
     offset: Option<u32>,
+    sort: Option<String>,
+    direction: Option<String>,
+    query: Option<String>,
+    artist_name: Option<String>,
 ) -> Result<Vec<SongRow>, String> {
-    let db = state.db.lock().expect("db mutex");
-    db.songs(limit.unwrap_or(200).min(1000), offset.unwrap_or(0)).map_err(db_err)
+    let state = app.state::<AppState>();
+    with_library(&app, &state, |db| {
+        db.songs_query(
+            limit.unwrap_or(200).min(1000),
+            offset.unwrap_or(0),
+            sort.as_deref().unwrap_or("title"),
+            direction.as_deref().unwrap_or("asc"),
+            query.as_deref(),
+            artist_name.as_deref(),
+        )
+    })
 }
 
 #[tauri::command]
 pub fn library_albums(
+    app: AppHandle,
     state: State<'_, AppState>,
     limit: Option<u32>,
     offset: Option<u32>,
+    sort: Option<String>,
+    direction: Option<String>,
+    artist_name: Option<String>,
 ) -> Result<Vec<AlbumRow>, String> {
-    let db = state.db.lock().expect("db mutex");
-    db.albums(limit.unwrap_or(200).min(1000), offset.unwrap_or(0)).map_err(db_err)
+    with_library(&app, &state, |db| {
+        db.albums_query(
+            limit.unwrap_or(200).min(1000),
+            offset.unwrap_or(0),
+            sort.as_deref().unwrap_or("title"),
+            direction.as_deref().unwrap_or("asc"),
+            artist_name.as_deref(),
+        )
+    })
 }
 
 #[tauri::command]
-pub fn library_playlists(state: State<'_, AppState>) -> Result<Vec<PlaylistRow>, String> {
-    let db = state.db.lock().expect("db mutex");
-    db.playlists().map_err(db_err)
+pub fn library_artists(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+    sort: Option<String>,
+    direction: Option<String>,
+) -> Result<Vec<crate::db::ArtistRow>, String> {
+    if sort.as_deref().is_some_and(|s| s != "name") {
+        return Err("Unsupported artist sort.".into());
+    }
+    let mut rows = with_library(&app, &state, |db| db.artists())?;
+    if direction.as_deref() == Some("desc") {
+        rows.reverse();
+    }
+    Ok(rows
+        .into_iter()
+        .skip(offset.unwrap_or(0) as usize)
+        .take(limit.unwrap_or(200).min(1000) as usize)
+        .collect())
+}
+
+#[tauri::command]
+pub fn library_playlists(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<PlaylistRow>, String> {
+    let mut rows = state
+        .db
+        .lock()
+        .expect("db mutex")
+        .playlists()
+        .map_err(db_err)?;
+    if let Some(imports) = app.try_state::<crate::import::State>() {
+        rows.extend(
+            imports
+                .db
+                .lock()
+                .map_err(|_| "Import database unavailable.")?
+                .playlists()
+                .map_err(db_err)?,
+        );
+    }
+    rows.sort_by_key(|p| p.name.to_lowercase());
+    Ok(rows)
 }
 
 #[tauri::command]
 pub fn library_album_songs(
+    app: AppHandle,
     state: State<'_, AppState>,
     album_id: String,
 ) -> Result<Vec<SongRow>, String> {
-    let db = state.db.lock().expect("db mutex");
-    db.album_songs(&album_id).map_err(db_err)
+    with_library(&app, &state, |db| db.album_songs(&album_id))
 }
 
 #[tauri::command]
 pub fn library_playlist_songs(
+    app: AppHandle,
     state: State<'_, AppState>,
     playlist_id: String,
 ) -> Result<Vec<SongRow>, String> {
+    if let Some(rows) = crate::import::jobs::playlist_songs(&app, &playlist_id)? {
+        return Ok(rows);
+    }
     let db = state.db.lock().expect("db mutex");
     db.playlist_songs(&playlist_id).map_err(db_err)
 }
 
 #[tauri::command]
 pub fn library_search(
+    app: AppHandle,
     state: State<'_, AppState>,
     query: String,
     limit: Option<u32>,
@@ -550,8 +621,9 @@ pub fn library_search(
     if query.trim().is_empty() {
         return Ok(Vec::new());
     }
-    let db = state.db.lock().expect("db mutex");
-    db.search(query.trim(), limit.unwrap_or(100).min(500)).map_err(db_err)
+    with_library(&app, &state, |db| {
+        db.search(query.trim(), limit.unwrap_or(100).min(500))
+    })
 }
 
 #[tauri::command]
@@ -687,9 +759,8 @@ pub async fn lyrics_for(app: AppHandle, track_id: String) -> Result<Lyrics, Stri
 }
 
 #[tauri::command]
-pub fn library_counts(state: State<'_, AppState>) -> Result<LibraryCounts, String> {
-    let db = state.db.lock().expect("db mutex");
-    db.counts().map_err(db_err)
+pub fn library_counts(app: AppHandle) -> Result<LibraryCounts, String> {
+    Ok(crate::sync::counts(&app))
 }
 
 #[tauri::command]

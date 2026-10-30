@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-qol-navigation-set"
+description = "Enables the qol_navigation_set command without any pre-configured scope."
+commands.allow = ["qol_navigation_set"]
+
+[[permission]]
+identifier = "deny-qol-navigation-set"
+description = "Denies the qol_navigation_set command without any pre-configured scope."
+commands.deny = ["qol_navigation_set"]
