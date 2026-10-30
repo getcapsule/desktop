@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-import { auth, dev, library, settings, type Settings } from '../lib/ipc'
+import { dev, library, settings, type Settings } from '../lib/ipc'
+import { ImportURL } from './ImportURL'
+import { DesktopPreferences } from './DesktopPreferences'
 import { dataDir } from '../lib/platform'
 import {
   Cards,
@@ -11,27 +13,74 @@ import {
   SourceSetup,
   Switch,
   ThemePicker,
+  type SettingsPatch,
 } from './fields'
 
-/**
- * Everything in config.toml that deserves a control, in the order people
- * actually change it. Writes on every edit - there is no Save button, because a
- * settings screen that can lose your work is worse than one that cannot.
- */
-export function SettingsView() {
+export function SettingsView({ focusTrackId }: { focusTrackId?: string }) {
   const [draft, setDraft] = useState<Settings | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  const writes = useRef(Promise.resolve())
+  const latest = useRef<Settings | null>(null)
+  const persisted = useRef<Settings | null>(null)
+  const themeRevision = useRef(0)
+  const materialRevision = useRef(0)
+  const [materialError, setMaterialError] = useState<string | null>(null)
+  const [materialPending, setMaterialPending] = useState(false)
+  const importSection = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (focusTrackId && draft) importSection.current?.scrollIntoView?.({ block: 'start' })
+  }, [focusTrackId, draft !== null])
 
   useEffect(() => {
-    void settings.get().then(setDraft)
+    void settings.get().then((saved) => {
+      latest.current = saved
+      persisted.current = saved
+      setDraft(saved)
+    })
   }, [])
 
   if (!draft) return null
 
-  const edit = (patch: Partial<Settings>) => {
-    const next = { ...draft, ...patch }
+  const edit = (patch: SettingsPatch) => {
+    const before = latest.current!
+    const appearance = patch.appearance ?? {}
+    const themeRequest = appearance.theme === undefined ? null : ++themeRevision.current
+    const materialRequest = appearance.glass === undefined ? null : ++materialRevision.current
+    if (materialRequest !== null) { setMaterialError(null); setMaterialPending(true) }
+    const next = { ...before, ...patch, appearance: { ...before.appearance, ...(appearance.glass === undefined ? {} : { glass: appearance.glass }) } }
+    latest.current = next
     setDraft(next)
-    void settings.set(next)
+    if (patch.source) setNote(null)
+    const write = writes.current.catch(() => {}).then(async () => {
+      // Apply each queued patch to the last successful write. A full snapshot
+      // captured earlier could undo a theme or carry a failed save forward.
+      const base = persisted.current!
+      const saved = { ...base, ...patch, appearance: { ...base.appearance, ...appearance } }
+      await settings.set(saved)
+      document.documentElement.dataset.glass = saved.appearance.glass
+      persisted.current = saved
+      if (themeRequest !== null && themeRequest === themeRevision.current) {
+        const current = latest.current!
+        const applied = { ...current, appearance: { ...current.appearance, theme: saved.appearance.theme } }
+        latest.current = applied
+        setDraft(applied)
+      }
+    })
+    writes.current = write
+    void write.catch((error) => {
+      if (materialRequest !== null) {
+        if (materialRequest === materialRevision.current) {
+          setMaterialError(String(error))
+          const current = latest.current!
+          const restored = { ...current, appearance: { ...current.appearance, glass: persisted.current!.appearance.glass } }
+          latest.current = restored
+          setDraft(restored)
+        }
+      } else setNote(String(error))
+    }).finally(() => {
+      if (materialRequest !== null && materialRequest === materialRevision.current) setMaterialPending(false)
+    })
+    return write
   }
 
   return (
@@ -51,14 +100,20 @@ export function SettingsView() {
           </div>
         </Section>
 
-        <Section title="Appearance" sub="Themes apply now; glass takes effect on the next launch.">
+        <Section title="Desktop" sub="Listening preferences for this computer.">
+          <DesktopPreferences />
+        </Section>
+
+        <Section title="Appearance" sub="Themes and materials apply immediately. Native desktop blur depends on Windows support.">
           <ThemePicker draft={draft} edit={edit} />
-          <div className="mt-4">
+          <div className="mt-4" role="group" aria-label="Window material" aria-busy={materialPending}>
             <Cards
               options={GLASS}
               value={draft.appearance.glass}
-              onChange={(glass) => edit({ appearance: { ...draft.appearance, glass } })}
+              onChange={(glass) => edit({ appearance: { glass } })}
             />
+            {materialPending && <p role="status" className="mt-2 text-xs text-muted">Applying material…</p>}
+            {materialError && <p role="alert" className="mt-2 text-xs text-crit">{materialError}</p>}
           </div>
         </Section>
 
@@ -119,7 +174,6 @@ export function SettingsView() {
                 setNote('Sync started.')
               }}
             />
-            <Action label="Sign in again" onClick={() => void auth.showLogin()} />
             <Action
               label="Run setup again"
               onClick={() => {
@@ -131,6 +185,7 @@ export function SettingsView() {
           {note && <p className="mt-3 text-[11px] text-muted">{note}</p>}
         </Section>
 
+        <div ref={importSection}><Section title="Import" sub="Import music from a Spotify, Apple Music, YouTube Music, or SoundCloud URL"><ImportURL onComplete={setNote} settingsDraft={draft} editSettings={edit} focusTrackId={focusTrackId} /></Section></div>
         <Section
           title="Developer"
           sub="Diagnostics for filing a bug report. Off by default because it is noise otherwise."
@@ -147,13 +202,6 @@ export function SettingsView() {
   )
 }
 
-/**
- * The state of the app as pasteable text.
- *
- * Exists so a bug report arrives with the facts already in it: which source,
- * which backend, what the player thinks it is doing. The server URL and every
- * credential are redacted on the Rust side.
- */
 function Diagnostics() {
   const [text, setText] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
@@ -209,10 +257,11 @@ function Section({
   )
 }
 
-function Action({ label, onClick }: { label: string; onClick: () => void }) {
+function Action({ label, onClick, disabled }: { label: string; onClick: () => void; disabled?: boolean }) {
   return (
     <button
       onClick={onClick}
+      disabled={disabled}
       className="rounded border border-rule px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:border-accent hover:text-ink"
     >
       {label}

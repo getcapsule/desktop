@@ -642,25 +642,45 @@ pub fn settings_set(
         return Err("no data directory; settings cannot be saved".into());
     };
 
-    let (previous, previous_theme) = {
-        let s = state.settings.lock().expect("settings mutex");
-        (s.source, s.appearance.theme.clone())
-    };
-    crate::settings::save(&dir, &settings).map_err(|e| e.to_string())?;
+    let previous_settings = state.settings.lock().expect("settings mutex").clone();
+    let previous = previous_settings.source;
+    let previous_theme = &previous_settings.appearance.theme;
     let source = settings.source;
     let theme_id = settings.appearance.theme.clone();
+    let previous_palette = state.theme.lock().expect("theme mutex").clone();
+    let next_palette = if &theme_id != previous_theme {
+        crate::theme::resolve(&crate::theme::load_all(Some(&dir)), &theme_id)
+    } else {
+        previous_palette.clone()
+    };
+    let mut apply_material = |appearance: &crate::settings::Appearance| {
+        let Some(window) = app.get_webview_window("main") else { return Ok(()) };
+        let palette = if appearance.theme == theme_id { &next_palette } else { &previous_palette };
+        crate::appearance::apply(&window, &appearance.glass, palette)
+    };
+    crate::appearance::save_with_material(&dir, &previous_settings, &settings, &mut apply_material)?;
+    if source != previous {
+        if let Err(error) = use_database_for(&app, source) {
+            if let Err(rollback) = crate::appearance::save_with_material(&dir, &settings, &previous_settings, &mut apply_material) {
+                tracing::warn!(error = %rollback, "could not restore settings after source failure");
+            }
+            return Err(error);
+        }
+    }
+    let appearance_changed = settings.appearance != previous_settings.appearance;
+    let glass = settings.appearance.glass.clone();
     *state.settings.lock().expect("settings mutex") = settings;
 
-    if theme_id != previous_theme {
-        let all = crate::theme::load_all(Some(&dir));
-        let resolved = crate::theme::resolve(&all, &theme_id);
-        let css = resolved.css();
-        *state.theme.lock().expect("theme mutex") = resolved;
+    if &theme_id != previous_theme {
+        let css = next_palette.css();
+        *state.theme.lock().expect("theme mutex") = next_palette;
         let _ = app.emit("theme://changed", css);
+    }
+    if appearance_changed {
+        let _ = app.emit("appearance://changed", glass);
     }
 
     if source != previous {
-        use_database_for(&app, source)?;
         reconcile_backend(&app, source);
         let _ = app.emit("library://updated", sync::counts(&app));
     }
@@ -687,7 +707,12 @@ pub fn themes_list(state: State<'_, AppState>) -> Vec<ThemeSummary> {
             entries
                 .flatten()
                 .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("toml"))
-                .filter_map(|e| e.path().file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                .filter_map(|e| {
+                    e.path()
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string)
+                })
                 .collect()
         })
         .unwrap_or_default();

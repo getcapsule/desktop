@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-themes-preview"
+description = "Enables the themes_preview command without any pre-configured scope."
+commands.allow = ["themes_preview"]
+
+[[permission]]
+identifier = "deny-themes-preview"
+description = "Denies the themes_preview command without any pre-configured scope."
+commands.deny = ["themes_preview"]

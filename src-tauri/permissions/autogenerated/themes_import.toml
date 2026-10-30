@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-themes-import"
+description = "Enables the themes_import command without any pre-configured scope."
+commands.allow = ["themes_import"]
+
+[[permission]]
+identifier = "deny-themes-import"
+description = "Denies the themes_import command without any pre-configured scope."
+commands.deny = ["themes_import"]

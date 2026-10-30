@@ -268,7 +268,7 @@ impl Theme {
         format!(
             "--color-ground:{};--color-panel:{};--color-rule:{};--color-ink:{};\
              --color-muted:{};--color-muted2:{};--color-accent:{};--color-ok:{};\
-             --color-warn:{};--color-crit:{};--edge-tint:{}",
+             --color-warn:{};--color-crit:{};--edge-tint:{};--theme-color-scheme:{}",
             self.ground.hex(),
             self.panel.hex(),
             self.rule.hex(),
@@ -279,7 +279,8 @@ impl Theme {
             self.ok.hex(),
             self.warn.hex(),
             self.crit.hex(),
-            tint
+            tint,
+            if self.is_dark() { "dark" } else { "light" }
         )
     }
 }
@@ -377,6 +378,20 @@ pub fn resolve(all: &[Theme], id: &str) -> Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_controls_follow_theme_polarity_including_custom_themes() {
+        for (ground, ink, expected) in [
+            ("#f4f2ee", "#2a2724", "--theme-color-scheme:light"),
+            ("#0d1014", "#ccd3db", "--theme-color-scheme:dark"),
+        ] {
+            let raw = format!(
+                "name = \"Custom\"\nground = \"{ground}\"\npanel = \"{ground}\"\nink = \"{ink}\"\naccent = \"#9c8fc0\""
+            );
+            let theme = Theme::from_toml("custom", &raw).unwrap();
+            assert!(theme.css().split(';').any(|rule| rule == expected));
+        }
+    }
 
     fn rgb(s: &str) -> Rgb {
         Rgb::parse(s).expect("valid hex")
