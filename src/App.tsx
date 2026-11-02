@@ -318,7 +318,7 @@ export default function App() {
           <Tab icon="history" on={view === 'history'} onClick={() => { setQuery(''); setDetail(null); setView('history') }}>Recently played</Tab>
           <Tab icon="discover" on={view === 'discover'} onClick={() => { setQuery(''); setDetail(null); setView('discover') }}>Discover</Tab>
           <Tab icon="downloads" on={view === 'downloads'} onClick={() => { setQuery(''); setDetail(null); setView('downloads') }}>Downloads</Tab>
-          <Tab icon="queue" on={view === 'queue' && !results} onClick={() => { setQuery(''); setDetail(null); setView('queue') }}>Queue <Count n={state?.queue.length ?? 0} /></Tab>
+          <Tab icon="queue" on={view === 'queue' && !results} onClick={() => { setQuery(''); setDetail(null); setView('queue') }}>Queue <Count n={Math.max(0, (state?.queue.length ?? 0) - (state?.index ?? 0))} /></Tab>
 
           <Tab icon="lyrics" on={view === 'lyrics' && !results} onClick={() => setView('lyrics')}>
             Lyrics

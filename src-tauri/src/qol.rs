@@ -461,6 +461,7 @@ fn tracks(app: &AppHandle, songs: Vec<SongRow>, source: Source) -> Result<Vec<Tr
                 artist: s.artist_name,
                 album: s.album_name,
                 duration_ms: s.duration_ms,
+                playback_route: None,
             })
         })
         .collect()

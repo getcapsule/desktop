@@ -6,7 +6,7 @@ import { EMPTY_QOL } from '../lib/qol-ipc'
 const invoke = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock('@tauri-apps/api/core', () => ({ invoke, convertFileSrc: (s: string) => s }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }))
-afterEach(() => { cleanup(); invoke.mockClear() })
+afterEach(() => { cleanup(); invoke.mockClear(); vi.unstubAllGlobals() })
 const song = { id: '/music/one.flac', name: 'One', artist_name: 'Artist', album_name: 'Album', catalog_id: null, duration_ms: 1000, artwork_url: null }
 it('offers separate play-next and append actions without replacing playback', async () => {
   render(<ListeningContext.Provider value={{ source: 'local', snapshot: EMPTY_QOL, problem: vi.fn(), artist: vi.fn(), album: vi.fn(), replace: vi.fn() }}><TrackTools songs={[song]} /></ListeningContext.Provider>)
@@ -40,4 +40,40 @@ it('supports menu keyboard navigation and preserves original favorite context', 
   fireEvent.click(screen.getByRole('button', { name: 'More actions for One' }))
   fireEvent.keyDown(screen.getByRole('menuitem', { name: 'Play next' }), { key: 'Escape' })
   expect(screen.queryByRole('menu')).toBeNull()
+})
+
+it('starts the visible queue at the current song and follows playback advances', () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  const queue = Array.from({ length: 20 }, (_, i) => ({ id: String(i), title: `Track ${i}`, artist: 'Artist', album: '', duration_ms: 1000 }))
+  const state = { queue, index: 7, status: 'playing' as const, position_ms: 0, volume: 50, shuffle: false, repeat: 'off' as const }
+  const { rerender } = render(<QueueView state={state} onProblem={vi.fn()} />)
+  expect(screen.queryByRole('button', { name: 'Play queue item 1: Track 0' })).toBeNull()
+  const current = screen.getByRole('button', { name: 'Play queue item 1: Track 7' })
+  expect(current.closest('[data-playing]')?.getAttribute('data-playing')).toBe('true')
+  expect(screen.getByText('13 tracks')).toBeDefined()
+  fireEvent.scroll(current.closest('.overflow-y-auto')!, { target: { scrollTop: 1040 } })
+  rerender(<QueueView state={{ ...state, index: 8 }} onProblem={vi.fn()} />)
+  expect(screen.getByRole('button', { name: 'Play queue item 1: Track 8' })).toBeDefined()
+  expect(screen.getByText('12 tracks')).toBeDefined()
+})
+
+it('edits upcoming queue entries using their original positions and keeps the current song first', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  const queue = Array.from({ length: 10 }, (_, i) => ({ id: 'duplicate', title: `Track ${i}`, artist: 'Artist', album: '', duration_ms: 1000 }))
+  render(<QueueView state={{ queue, index: 7, status: 'playing', position_ms: 0, volume: 50, shuffle: false, repeat: 'off' }} onProblem={vi.fn()} />)
+  expect((screen.getByRole('button', { name: 'Move queue item 1 down' }) as HTMLButtonElement).disabled).toBe(true)
+  expect((screen.getByRole('button', { name: 'Move queue item 2 up' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Play queue item 2: Track 8' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('qol_queue_jump', { index: 8 }))
+  fireEvent.click(screen.getByRole('button', { name: 'Remove queue item 2' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('qol_queue_remove', { index: 8 }))
+  fireEvent.click(screen.getByRole('button', { name: 'Move queue item 3 up' }))
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('qol_queue_move', { from: 9, to: 8 }))
+  const last = screen.getByRole('button', { name: 'Play queue item 3: Track 9' }).closest('[draggable]')!
+  const next = screen.getByRole('button', { name: 'Play queue item 2: Track 8' }).closest('[draggable]')!
+  const dataTransfer = { setData: vi.fn(), effectAllowed: '', dropEffect: '' }
+  invoke.mockClear()
+  fireEvent.dragStart(last, { dataTransfer })
+  fireEvent.drop(next, { dataTransfer })
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith('qol_queue_move', { from: 9, to: 8 }))
 })

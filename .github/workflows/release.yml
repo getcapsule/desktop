@@ -6,10 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing version tag to build and publish
+        description: Existing version tag containing the source and packaging changes
         required: true
         type: string
-        default: v0.5.0
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
@@ -46,6 +45,8 @@ jobs:
             libxdo-dev \
             libssl-dev \
             build-essential \
+            pkg-config \
+            libfuse2 \
             patchelf \
             file
       - uses: oven-sh/setup-bun@v2
@@ -59,6 +60,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          tauriScript: bun run tauri
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: capsule ${{ inputs.tag || github.ref_name }}
           args: ${{ matrix.args }}
@@ -69,7 +71,29 @@ jobs:
 
             **Windows:** use the `.exe` installer. The build is unsigned.
 
-            **Linux:** use the `.deb` or `.AppImage` package.
+            **Linux / Arch:** use the `.AppImage` file and mark it executable before opening it.
+            **Debian / Ubuntu:** the `.deb` package is also available.
 
             Local files, Navidrome, public YouTube playback, and SoundCloud are supported.
             Acrylic and mica window materials are Windows-only.
+      - name: Verify Linux release packages
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          appimages=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          debs=(src-tauri/target/release/bundle/deb/*.deb)
+          if (( ${#appimages[@]} == 0 || ${#debs[@]} == 0 )); then
+            echo "::error::Expected both AppImage and Debian release packages."
+            exit 1
+          fi
+          ls -lh "${appimages[@]}" "${debs[@]}"
+      - name: Retain Linux packages as workflow artifacts
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: capsule-linux-x86_64
+          path: |
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error

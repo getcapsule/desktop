@@ -14,7 +14,7 @@ fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, DbError> {
 }
 
 impl Db {
-    /// Persist a searched source recording without creating an import playlist.
+    /// Cache a source recording for playback without adding it to the saved library.
     pub fn save_source_track(&mut self, imported: &ImportedTrack) -> Result<CapsuleTrack, DbError> {
         validate_metadata(imported)?;
         let origin = &imported.origin;
@@ -28,7 +28,7 @@ impl Db {
             )
             .optional()?;
         let id = existing.unwrap_or_else(|| Uuid::new_v4().to_string());
-        tx.execute("INSERT INTO tracks(id,title,artists,album,duration_ms,artwork_url,isrc,explicit) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO NOTHING",params![id,m.title,json(&m.artists)?,m.album,m.duration_ms,m.artwork_url,m.isrc,m.explicit])?;
+        tx.execute("INSERT INTO tracks(id,title,artists,album,duration_ms,artwork_url,isrc,explicit,in_library) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0) ON CONFLICT(id) DO NOTHING",params![id,m.title,json(&m.artists)?,m.album,m.duration_ms,m.artwork_url,m.isrc,m.explicit])?;
         tx.execute("INSERT INTO track_origins(track_id,platform,external_id,url,metadata_json) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(platform,external_id) DO UPDATE SET url=excluded.url,metadata_json=excluded.metadata_json",params![id,origin.platform.as_str(),origin.external_id,origin.url,json(m)?])?;
         tx.execute("INSERT INTO track_resolution(track_id,state) VALUES(?1,'matched') ON CONFLICT DO NOTHING", [&id])?;
         tx.commit()?;
@@ -55,7 +55,12 @@ impl Db {
                 ));
             }
         }
-        self.conn.execute("INSERT INTO track_origins(track_id,platform,external_id,url) VALUES(?1,?2,?3,?4) ON CONFLICT(platform,external_id) DO UPDATE SET url=excluded.url",params![track,origin.platform.as_str(),origin.external_id,origin.url])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("INSERT INTO track_origins(track_id,platform,external_id,url) VALUES(?1,?2,?3,?4) ON CONFLICT(platform,external_id) DO UPDATE SET url=excluded.url",params![track,origin.platform.as_str(),origin.external_id,origin.url])?;
+        if origin.platform == Platform::Local {
+            tx.execute("UPDATE tracks SET in_library=1 WHERE id=?1", [track])?;
+        }
+        tx.commit()?;
         Ok(())
     }
     pub fn source_preference(&self, track: &str) -> Result<Option<Platform>, DbError> {
@@ -219,7 +224,7 @@ impl Db {
                 }
             }
             let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
-            tx.execute("INSERT INTO tracks(id,title,artists,album,duration_ms,artwork_url,isrc,explicit) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO NOTHING",params![id,m.title,json(&m.artists)?,m.album,m.duration_ms,m.artwork_url,isrc,m.explicit])?;
+            tx.execute("INSERT INTO tracks(id,title,artists,album,duration_ms,artwork_url,isrc,explicit) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(id) DO UPDATE SET in_library=1",params![id,m.title,json(&m.artists)?,m.album,m.duration_ms,m.artwork_url,isrc,m.explicit])?;
             tx.execute("INSERT INTO track_origins(track_id,platform,external_id,url,metadata_json) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(platform,external_id) DO UPDATE SET url=excluded.url,metadata_json=excluded.metadata_json",params![id,origin.platform.as_str(),origin.external_id,origin.url,json(m)?])?;
             tx.execute(
                 "INSERT INTO track_resolution(track_id) VALUES(?1) ON CONFLICT DO NOTHING",

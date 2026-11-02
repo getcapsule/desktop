@@ -399,11 +399,7 @@ fn send_inner(
                     revision: player.state().playback_revision,
                     index: player.state().index.unwrap_or(0),
                 };
-                engine.load_gapless(
-                    stream.url,
-                    cache,
-                    audio_key,
-                );
+                engine.load_gapless(stream.url, cache, audio_key);
                 engine.set_gapless_format(audio_key, stream.audio_info);
                 player.on_now_playing(&worker_ticket.track_id, stream.duration_ms);
                 engine.set_volume(player.state().volume);
@@ -491,11 +487,12 @@ fn prewarm_next(app: &AppHandle) {
                         index,
                     },
                     track.id.clone(),
+                    track.playback_route.clone(),
                 )
             })
         })
     };
-    let Some((revision, key, next)) = next else {
+    let Some((revision, key, next, requested)) = next else {
         engine.plan_gapless(expected, None);
         native.prepared.lock().expect("YouTube prepared").take();
         if let Some(task) = native.prefetch.lock().expect("YouTube prefetch").take() {
@@ -503,7 +500,10 @@ fn prewarm_next(app: &AppHandle) {
         }
         return;
     };
-    let video = if crate::import::playback::owns_current(app) {
+    let video = if let Some(requested) = requested {
+        (requested.provider == crate::import::model::Platform::Youtube)
+            .then_some(requested.external_id)
+    } else if crate::import::playback::owns_current(app) {
         app.try_state::<crate::import::State>().and_then(|imports| {
             let db = imports.db.lock().ok()?;
             if db
@@ -654,6 +654,7 @@ mod tests {
             artist: String::new(),
             album: String::new(),
             duration_ms: 1_000,
+            playback_route: None,
         };
         let mut state = PlayerState {
             queue: vec![track("duplicate"), track("other"), track("duplicate")],

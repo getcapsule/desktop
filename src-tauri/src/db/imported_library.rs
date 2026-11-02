@@ -46,9 +46,11 @@ impl Db {
         Ok(revision.wrapping_add(external.rotate_left(32)))
     }
     pub fn has_imported_tracks(&self) -> Result<bool, DbError> {
-        Ok(self
-            .conn
-            .query_row("SELECT EXISTS(SELECT 1 FROM tracks)", [], |row| row.get(0))?)
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tracks WHERE in_library=1)",
+            [],
+            |row| row.get(0),
+        )?)
     }
 }
 
@@ -103,7 +105,7 @@ impl LibraryView {
         if let Some(imports) = imports {
             let mut statement = imports
                 .conn
-                .prepare("SELECT id FROM tracks ORDER BY created_at, id")?;
+                .prepare("SELECT id FROM tracks WHERE in_library=1 ORDER BY created_at, id")?;
             let ids = statement
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -179,6 +181,8 @@ fn imported_album_id(album: &str, credit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // These tests share the process-wide one-entry projection cache.
+    static CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     use crate::import::{
         model::{fixture, ImportedCollection, Platform},
@@ -206,6 +210,75 @@ mod tests {
             .unwrap();
         db.set_import_preview(&job.id, &collection).unwrap();
         db.confirm_import(&job.id).unwrap()
+    }
+
+    #[test]
+    fn explicit_import_promotes_cached_tracks_and_replay_does_not_hide_saved_songs() {
+        let provider = Db::open_in_memory().unwrap();
+        let mut imports = Db::open_in_memory().unwrap();
+        let cached = imports.save_source_track(&fixture("one", "Zulu")).unwrap();
+        let playlist = import(&mut imports);
+        assert_eq!(
+            imports.import_entries(&playlist).unwrap()[0].track.id,
+            cached.id
+        );
+        imports.save_source_track(&fixture("one", "Zulu")).unwrap();
+        let library = LibraryView::load(&provider, Some(&imports), "local").unwrap();
+        assert_eq!(library.db.counts().unwrap().songs, 2);
+        assert!(library.db.song_by_id(&cached.id).unwrap().is_some());
+        assert!(imports.has_imported_tracks().unwrap());
+    }
+
+    #[test]
+    fn library_membership_migration_preserves_previously_saved_tracks() {
+        let conn = Connection::open_in_memory().unwrap();
+        let previous = MIGRATIONS.len() - 1;
+        for sql in MIGRATIONS.iter().take(previous) {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", previous).unwrap();
+        conn.execute(
+            "INSERT INTO tracks(id,title,artists) VALUES('saved','Saved song','[\"Artist\"]')",
+            [],
+        )
+        .unwrap();
+        let imports = Db::init(conn).unwrap();
+        let library =
+            LibraryView::load(&Db::open_in_memory().unwrap(), Some(&imports), "local").unwrap();
+        assert!(library.db.song_by_id("saved").unwrap().is_some());
+        assert!(imports.has_imported_tracks().unwrap());
+    }
+
+    #[test]
+    fn offline_download_promotes_playback_only_track_and_invalidates_cached_library() {
+        let _cache_test = CACHE_TEST_LOCK.lock().unwrap();
+        let provider = Db::open_in_memory().unwrap();
+        let mut imports = Db::open_in_memory().unwrap();
+        let mut recording = fixture("42", "Downloaded song");
+        recording.origin.platform = Platform::Soundcloud;
+        let cached = imports.save_source_track(&recording).unwrap();
+        let before = LibraryView::cached(&provider, &imports, "local", 1).unwrap();
+        assert_eq!(before.lock().unwrap().db.counts().unwrap().songs, 0);
+        imports
+            .attach_playback_origin(
+                &cached.id,
+                &crate::import::model::Origin {
+                    platform: Platform::Local,
+                    external_id: "downloaded-song.flac".into(),
+                    url: None,
+                },
+            )
+            .unwrap();
+        let after = LibraryView::cached(&provider, &imports, "local", 1).unwrap();
+        assert!(!Arc::ptr_eq(&before, &after));
+        assert_eq!(after.lock().unwrap().db.counts().unwrap().songs, 1);
+        assert!(after
+            .lock()
+            .unwrap()
+            .db
+            .song_by_id(&cached.id)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -319,6 +392,7 @@ mod tests {
 
     #[test]
     fn cached_projection_reuses_pages_ignores_progress_and_invalidates_metadata() {
+        let _cache_test = CACHE_TEST_LOCK.lock().unwrap();
         let provider = Db::open_in_memory().unwrap();
         let mut imports = Db::open_in_memory().unwrap();
         let playlist = import(&mut imports);

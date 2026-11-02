@@ -85,15 +85,28 @@ export function SelectionBar({ songs, entries, onClear }: { songs: SongRow[]; en
 export function QueueView({ state, onProblem }: { state: PlayerState | null; onProblem: (s: string) => void }) {
   const [dragging, setDragging] = useState<number | null>(null)
   const run = (promise: Promise<unknown>) => void promise.catch(e => onProblem(String(e)))
-  const rows = state?.queue ?? []
+  const start = Math.max(0, state?.index ?? 0)
+  const rows = state?.queue.slice(start) ?? []
+  const firstUpcoming = state?.index == null ? 0 : 1
   return <div className="flex h-full flex-col">
     <div className="flex shrink-0 items-center gap-3 border-b border-rule px-4 py-3"><h1 className="mr-auto text-sm font-semibold">Queue <span className="text-xs font-normal text-muted">{rows.length} tracks</span></h1><button className={button} onClick={() => run(qol.undo())}>Undo queue change</button><button className={button} disabled={!rows.length} onClick={() => run(qol.clear())}>Clear queue</button></div>
-    <div className="relative min-h-0 flex-1"><VirtualList items={rows} rowHeight={52} empty={<span className="text-xs text-muted">Your queue is empty.</span>} render={(track, index) => <div draggable onDragStart={e => { setDragging(index); e.dataTransfer.setData('text/plain', String(index)); e.dataTransfer.effectAllowed = 'move' }} onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move' }} onDragEnd={() => setDragging(null)} onDrop={e => { e.preventDefault(); if (dragging !== null && dragging !== index) run(qol.move(dragging, index)); setDragging(null) }} className="row mx-2 flex h-[52px] items-center gap-3 px-2" data-playing={state?.index === index}>
-      <button aria-label={`Play queue item ${index + 1}: ${track.title}`} className="min-w-0 flex-1 truncate text-left text-xs" onClick={() => run(qol.jump(index))}><span className="mr-3 data text-muted">{index + 1}</span>{track.title}<span className="ml-3 text-muted">{track.artist}</span></button>
-      <span className="data text-[10px] text-muted">{formatTime(track.duration_ms)}</span>
-      <button className={button} aria-label={`Move queue item ${index + 1} up`} disabled={index === 0} onClick={() => run(qol.move(index, index - 1))}>Up</button>
-      <button className={button} aria-label={`Move queue item ${index + 1} down`} disabled={index === rows.length - 1} onClick={() => run(qol.move(index, index + 1))}>Down</button>
-      <button className={button} aria-label={`Remove queue item ${index + 1}`} onClick={() => run(qol.remove(index))}>Remove</button>
-    </div>} /></div>
+    <div className="relative min-h-0 flex-1"><VirtualList key={start} items={rows} rowHeight={52} empty={<span className="text-xs text-muted">Your queue is empty.</span>} render={(track, index) => {
+      const queueIndex = start + index
+      const canReorder = queueIndex > (state?.index ?? -1)
+      return <div draggable={canReorder} onDragStart={e => {
+        if (!canReorder) { e.preventDefault(); return }
+        setDragging(queueIndex); e.dataTransfer.setData('text/plain', String(queueIndex)); e.dataTransfer.effectAllowed = 'move'
+      }} onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = canReorder ? 'move' : 'none' }} onDragEnd={() => setDragging(null)} onDrop={e => {
+        e.preventDefault()
+        if (canReorder && dragging !== null && dragging > (state?.index ?? -1) && dragging !== queueIndex) run(qol.move(dragging, queueIndex))
+        setDragging(null)
+      }} className="row mx-2 flex h-[52px] items-center gap-3 px-2" data-playing={state?.index === queueIndex}>
+        <button aria-label={`Play queue item ${index + 1}: ${track.title}`} className="min-w-0 flex-1 truncate text-left text-xs" onClick={() => run(qol.jump(queueIndex))}><span className="mr-3 data text-muted">{index + 1}</span>{track.title}<span className="ml-3 text-muted">{track.artist}</span></button>
+        <span className="data text-[10px] text-muted">{formatTime(track.duration_ms)}</span>
+        <button className={button} aria-label={`Move queue item ${index + 1} up`} disabled={!canReorder || index <= firstUpcoming} onClick={() => run(qol.move(queueIndex, queueIndex - 1))}>Up</button>
+        <button className={button} aria-label={`Move queue item ${index + 1} down`} disabled={!canReorder || index === rows.length - 1} onClick={() => run(qol.move(queueIndex, queueIndex + 1))}>Down</button>
+        <button className={button} aria-label={`Remove queue item ${index + 1}`} onClick={() => run(qol.remove(queueIndex))}>Remove</button>
+      </div>
+    }} /></div>
   </div>
 }

@@ -155,6 +155,7 @@ mod tests {
                 artist: String::new(),
                 album: String::new(),
                 duration_ms: 1000,
+                playback_route: None,
             }],
             0,
         );
@@ -216,6 +217,7 @@ mod tests {
                     artist: String::new(),
                     album: String::new(),
                     duration_ms: 1000,
+                    playback_route: None,
                 }],
                 0,
             );
@@ -243,6 +245,7 @@ mod tests {
                 artist: String::new(),
                 album: String::new(),
                 duration_ms: 1000,
+                playback_route: None,
             }],
             0,
         );

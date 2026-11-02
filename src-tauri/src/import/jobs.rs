@@ -878,7 +878,9 @@ pub fn import_source_preference(
         .lock()
         .map_err(err)?
         .set_source_preference(&track_id, provider)
-        .map_err(err)
+        .map_err(err)?;
+    super::playback::recording_changed(&app, &track_id);
+    Ok(())
 }
 
 /// Linking an existing source is explicit; a shared title is never an identity.

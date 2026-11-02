@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Route {
     pub provider: Platform,
     pub external_id: String,
@@ -58,6 +58,35 @@ pub fn select_route(
                 .find(|candidate| &candidate.route.provider == provider)
                 .map(|candidate| candidate.route.clone())
         })
+}
+
+/// An exact queue recording takes precedence over saved library preferences.
+pub fn select_recording(
+    routes: &[AvailableRoute],
+    preference: Option<Platform>,
+    priority: &[Platform],
+    requested: Option<&Route>,
+) -> Option<Route> {
+    if let Some(requested) = requested {
+        return routes
+            .iter()
+            .find(|candidate| {
+                candidate.verified
+                    && candidate.available
+                    && DEFAULT_PRIORITY.contains(&candidate.route.provider)
+                    && &candidate.route == requested
+            })
+            .map(|candidate| candidate.route.clone());
+    }
+    select_route(routes, preference, priority)
+}
+
+fn allows_youtube_recovery(
+    requested: Option<&Route>,
+    saved: Option<Platform>,
+    enabled: bool,
+) -> bool {
+    requested.is_none() && enabled && saved.is_none_or(|source| source == Platform::Youtube)
 }
 
 #[derive(Default)]
@@ -295,13 +324,20 @@ pub fn report_native_failure(app: &AppHandle, track_id: &str, _message: &str) ->
 }
 
 fn start_automatic_playback(app: &AppHandle, track_id: &str) -> bool {
-    let (revision, index) = {
+    let (revision, index, requested) = {
         let state = app.state::<AppState>();
         let player = state.player.lock().expect("player mutex");
         if matches!(player.state().status, Status::Ended | Status::Idle) {
             return false;
         }
-        (player.state().playback_revision, player.state().index)
+        (
+            player.state().playback_revision,
+            player.state().index,
+            player
+                .state()
+                .current()
+                .and_then(|track| track.playback_route.clone()),
+        )
     };
     let Some(playback) = app.try_state::<State>() else {
         return false;
@@ -311,13 +347,11 @@ fn start_automatic_playback(app: &AppHandle, track_id: &str) -> bool {
     };
     {
         let db = imports.db.lock().expect("import db");
-        if db
-            .source_preference(track_id)
-            .ok()
-            .flatten()
-            .is_some_and(|source| source != Platform::Youtube)
-            || db.meta("youtube_native_enabled").ok().flatten().as_deref() == Some("false")
-        {
+        if !allows_youtube_recovery(
+            requested.as_ref(),
+            db.source_preference(track_id).ok().flatten(),
+            db.meta("youtube_native_enabled").ok().flatten().as_deref() != Some("false"),
+        ) {
             return false;
         }
     }
@@ -504,6 +538,11 @@ fn start_automatic_playback(app: &AppHandle, track_id: &str) -> bool {
 
 /// An explicit recording choice cancels any older in-flight stream refresh.
 pub fn recording_changed(app: &AppHandle, track_id: &str) {
+    app.state::<AppState>()
+        .player
+        .lock()
+        .expect("player mutex")
+        .clear_recording_choice(track_id);
     let Some(playback) = app.try_state::<State>() else {
         return;
     };
@@ -514,6 +553,7 @@ pub fn recording_changed(app: &AppHandle, track_id: &str) {
         .filter(|session| session.track_id == track_id)
     {
         session.route = None;
+        crate::soundcloud_playback::stop(app);
         crate::youtube_native::stop(app);
         let state = app.state::<AppState>();
         let still_current = {
@@ -642,8 +682,8 @@ pub fn dispatch(app: &AppHandle, state: &AppState, commands: &[EngineCommand]) -
         .expect("player mutex")
         .state()
         .current()
-        .map(|track| track.id.clone());
-    let Some(track_id) = current else {
+        .map(|track| (track.id.clone(), track.playback_route.clone()));
+    let Some((track_id, requested)) = current else {
         return false;
     };
     let track = {
@@ -789,7 +829,7 @@ pub fn dispatch(app: &AppHandle, state: &AppState, commands: &[EngineCommand]) -
         verified: mapping.verified && mapping.provider == "youtube",
         available: youtube_enabled && strict_video_id(&mapping.external_id),
     }));
-    let route = select_route(&routes, preference, &priority);
+    let route = select_recording(&routes, preference, &priority, requested.as_ref());
     let Some(route) = route else {
         let resolution = imports
             .db
@@ -807,7 +847,7 @@ pub fn dispatch(app: &AppHandle, state: &AppState, commands: &[EngineCommand]) -
             track_id: track_id.clone(),
             route: None,
         });
-        if preference.is_none() || preference == Some(Platform::Youtube) {
+        if allows_youtube_recovery(requested.as_ref(), preference, youtube_enabled) {
             if commands
                 .iter()
                 .any(|command| matches!(command, EngineCommand::Pause))
@@ -988,6 +1028,25 @@ pub fn release(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_soundcloud_recording_never_recovers_to_a_youtube_match() {
+        let requested = super::Route {
+            provider: super::Platform::Soundcloud,
+            external_id: "42".into(),
+        };
+        assert!(!super::allows_youtube_recovery(
+            Some(&requested),
+            None,
+            true
+        ));
+        assert!(!super::allows_youtube_recovery(
+            Some(&requested),
+            Some(super::Platform::Youtube),
+            true
+        ));
+        assert!(super::allows_youtube_recovery(None, None, true));
+        assert!(!super::allows_youtube_recovery(None, None, false));
+    }
     #[test]
     fn native_errors_identify_the_failure_without_exposing_raw_details() {
         assert!(super::native_error_message(

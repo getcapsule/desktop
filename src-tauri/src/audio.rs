@@ -916,6 +916,17 @@ impl EndDetector {
     }
 }
 
+fn resolution_pending(youtube: bool, soundcloud: bool) -> bool {
+    youtube || soundcloud
+}
+
+fn native_resolution_pending(app: &tauri::AppHandle) -> bool {
+    resolution_pending(
+        crate::youtube_native::is_resolving(app),
+        crate::soundcloud_playback::is_resolving(app),
+    )
+}
+
 pub fn start_ticker(app: tauri::AppHandle) {
     tauri::async_runtime::spawn(async move {
         use tauri::{Emitter, Manager};
@@ -950,6 +961,13 @@ pub fn start_ticker(app: tauri::AppHandle) {
                 published_format = Some(format);
             }
 
+            // The previous stream can retain an error until its replacement loads.
+            // Do not restart its recovery or report its old position/end in the meantime.
+            if native_resolution_pending(&app) {
+                detector = EndDetector::default();
+                continue;
+            }
+
             if let Some(err) = engine.current_error() {
                 if crate::import::playback::owns_current(&app) {
                     let state = app.state::<crate::AppState>();
@@ -978,7 +996,7 @@ pub fn start_ticker(app: tauri::AppHandle) {
                 continue;
             }
 
-            if engine.is_loading() || crate::youtube_native::is_resolving(&app) {
+            if engine.is_loading() || native_resolution_pending(&app) {
                 detector = EndDetector::default();
                 continue;
             }
@@ -1008,7 +1026,7 @@ pub fn start_ticker(app: tauri::AppHandle) {
             if detector.observe(
                 generation,
                 empty,
-                engine.is_loading() || crate::youtube_native::is_resolving(&app),
+                engine.is_loading() || native_resolution_pending(&app),
             ) {
                 crate::commands::apply(&app, |p| {
                     if engine.generation() != generation
@@ -1041,6 +1059,16 @@ pub fn start_ticker(app: tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soundcloud_refresh_waits_before_observing_the_previous_stream_again() {
+        assert!(
+            resolution_pending(false, true),
+            "an in-flight SoundCloud refresh must not consume the old error again"
+        );
+        assert!(resolution_pending(true, false));
+        assert!(!resolution_pending(false, false));
+    }
 
     #[test]
     fn restored_aac_pcm_starts_at_the_saved_audio_not_just_the_saved_clock() {

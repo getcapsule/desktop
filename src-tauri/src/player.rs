@@ -8,6 +8,8 @@ pub struct Track {
     pub album: String,
     #[serde(default)]
     pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_route: Option<crate::import::playback::Route>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,6 +217,18 @@ impl Player {
             },
             EngineCommand::Play,
         ]
+    }
+
+    pub fn clear_recording_choice(&mut self, track_id: &str) {
+        for track in self
+            .state
+            .queue
+            .iter_mut()
+            .filter(|track| track.id == track_id)
+        {
+            track.playback_route = None;
+        }
+        self.undo = None;
     }
 
     pub fn play(&mut self) -> Vec<EngineCommand> {
@@ -669,6 +683,7 @@ mod tests {
             artist: "a".into(),
             album: "b".into(),
             duration_ms: 200_000,
+            playback_route: None,
         }
     }
 
@@ -949,6 +964,7 @@ mod qol_tests {
             artist: String::new(),
             album: String::new(),
             duration_ms: 10000,
+            playback_route: None,
         }
     }
     #[test]
