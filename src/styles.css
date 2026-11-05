@@ -105,12 +105,9 @@ option { color: var(--color-ink); background: var(--color-panel); }
 .app-brand { display: flex; align-items: center; gap: 10px; flex: 0 0 170px; font-size: 19px; font-weight: 650; letter-spacing: -0.045em; }
 .brand-mark {
   display: inline-block;
-  width: 13px;
+  width: 23px;
   height: 23px;
-  border: 1.5px solid var(--color-accent);
-  border-radius: 20px;
-  background: linear-gradient(180deg, var(--color-accent) 49%, transparent 50%);
-  transform: rotate(35deg);
+  background: url('./assets/capsule-symbol.png') center / contain no-repeat;
   pointer-events: none;
 }
 .library-search {

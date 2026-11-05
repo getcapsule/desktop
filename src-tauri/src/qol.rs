@@ -1,5 +1,6 @@
 use crate::{
     db::SongRow,
+    import::playback::Route,
     player::{PlayerState, Status, Track},
     settings::Source,
     AppState,
@@ -7,6 +8,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
+    io::Cursor,
     path::{Path, PathBuf},
     sync::{mpsc, Mutex},
     time::{Duration, Instant},
@@ -15,17 +17,28 @@ use tauri::{AppHandle, Emitter, Manager};
 
 const FILE: &str = "listening-state.sqlite3";
 const HISTORY_LIMIT: usize = 200;
+const MAX_COVER_BYTES: usize = 5 * 1024 * 1024;
+const MAX_COVER_SIDE: u32 = 512;
+pub(crate) const PLAYLIST_COVER_PREFIX: &str = "qol-cover:";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SongEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_id: Option<String>,
     pub song: SongRow,
     pub source: Source,
     #[serde(default)]
     pub context: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_route: Option<Route>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LocalPlaylist {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub cover_id: Option<String>,
     pub songs: Vec<SongEntry>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -60,6 +73,13 @@ pub struct State {
 fn decode(json: &str) -> Saved {
     let mut saved: Saved = serde_json::from_str(json).unwrap_or_default();
     saved.snapshot.history.truncate(HISTORY_LIMIT);
+    for playlist in &mut saved.snapshot.playlists {
+        for entry in &mut playlist.songs {
+            entry
+                .entry_id
+                .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
+        }
+    }
     if saved
         .session
         .as_ref()
@@ -80,12 +100,135 @@ fn read(path: &Path) -> Saved {
     result.ok().map(|s| decode(&s)).unwrap_or_default()
 }
 fn write(path: &Path, saved: &Saved) -> Result<(), String> {
+    write_with_cover(path, saved, None, None)
+}
+
+fn write_with_cover(
+    path: &Path,
+    saved: &Saved,
+    new_cover: Option<(&str, &[u8])>,
+    old_cover: Option<&str>,
+) -> Result<(), String> {
     let json = serde_json::to_string(saved).map_err(|e| e.to_string())?;
     let mut db = rusqlite::Connection::open(path).map_err(|e| e.to_string())?;
-    db.execute_batch("CREATE TABLE IF NOT EXISTS snapshot(id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL)").map_err(|e|e.to_string())?;
     let transaction = db.transaction().map_err(|e| e.to_string())?;
+    transaction
+        .execute_batch("CREATE TABLE IF NOT EXISTS snapshot(id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL);
+                        CREATE TABLE IF NOT EXISTS playlist_covers(id TEXT PRIMARY KEY,bytes BLOB NOT NULL);")
+        .map_err(|e| e.to_string())?;
+    if let Some((id, bytes)) = new_cover {
+        transaction
+            .execute(
+                "INSERT INTO playlist_covers VALUES(?1,?2)",
+                rusqlite::params![id, bytes],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(id) = old_cover {
+        transaction
+            .execute("DELETE FROM playlist_covers WHERE id=?1", [id])
+            .map_err(|e| e.to_string())?;
+    }
     transaction.execute("INSERT INTO snapshot VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",[json]).map_err(|e|e.to_string())?;
     transaction.commit().map_err(|e| e.to_string())
+}
+
+fn read_playlist_cover(path: &Path, id: &str) -> Option<Vec<u8>> {
+    uuid::Uuid::parse_str(id.strip_prefix(PLAYLIST_COVER_PREFIX)?).ok()?;
+    let db =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    db.query_row("SELECT bytes FROM playlist_covers WHERE id=?1", [id], |row| row.get(0))
+        .ok()
+}
+
+pub(crate) fn playlist_cover(app: &AppHandle, id: &str) -> Option<Vec<u8>> {
+    let state = app.try_state::<State>()?;
+    read_playlist_cover(state.path.as_deref()?, id)
+}
+
+fn encode_cover(image: image::DynamicImage) -> Result<Vec<u8>, String> {
+    let mut bytes = Cursor::new(Vec::new());
+    image
+        .into_rgba8()
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .map_err(|_| "Could not encode the playlist cover.")?;
+    Ok(bytes.into_inner())
+}
+
+fn normalize_cover(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.len() > MAX_COVER_BYTES {
+        return Err("Choose a cover image up to 5 MiB.".into());
+    }
+    let mut reader = image::ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_COVER_SIDE);
+    limits.max_image_height = Some(MAX_COVER_SIDE);
+    limits.max_alloc = Some(8 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader
+        .decode()
+        .map_err(|_| "Could not read the playlist cover.")?;
+    encode_cover(image)
+}
+
+enum CoverEdit {
+    Keep,
+    Remove,
+    Replace(Vec<u8>),
+}
+
+fn playlist_name(name: String) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 200 {
+        return Err("Enter a playlist name up to 200 characters.".into());
+    }
+    Ok(name.to_owned())
+}
+
+fn persist_playlist_edit(
+    path: &Path,
+    saved: &mut Saved,
+    playlist_id: &str,
+    name: String,
+    description: String,
+    cover: CoverEdit,
+) -> Result<(), String> {
+    let name = playlist_name(name)?;
+    let description = description.trim();
+    if description.chars().count() > 1000 {
+        return Err("Enter a playlist description up to 1,000 characters.".into());
+    }
+    let playlists = &mut saved.snapshot.playlists;
+    let index = playlists
+        .iter()
+        .position(|playlist| playlist.id == playlist_id)
+        .ok_or("Playlist no longer exists.")?;
+    let playlist = &mut playlists[index];
+    let cover_id = match &cover {
+        CoverEdit::Keep => playlist.cover_id.clone(),
+        CoverEdit::Remove => None,
+        CoverEdit::Replace(_) => Some(format!("{PLAYLIST_COVER_PREFIX}{}", uuid::Uuid::new_v4())),
+    };
+    let previous_name = std::mem::replace(&mut playlist.name, name);
+    let previous_description = std::mem::replace(&mut playlist.description, description.to_owned());
+    let previous_cover_id = std::mem::replace(&mut playlist.cover_id, cover_id.clone());
+    let new_cover = match &cover {
+        CoverEdit::Replace(bytes) => cover_id.as_deref().map(|id| (id, bytes.as_slice())),
+        _ => None,
+    };
+    let old_cover = match &cover {
+        CoverEdit::Keep => None,
+        _ => previous_cover_id.as_deref(),
+    };
+    if let Err(error) = write_with_cover(path, saved, new_cover, old_cover) {
+        let playlist = &mut saved.snapshot.playlists[index];
+        playlist.name = previous_name;
+        playlist.description = previous_description;
+        playlist.cover_id = previous_cover_id;
+        tracing::warn!(%error, "could not persist playlist edit");
+        return Err("Could not save the playlist changes.".into());
+    }
+    Ok(())
 }
 fn source_context(source: Source, settings: &crate::settings::Settings) -> Option<String> {
     (source == Source::Navidrome).then(|| {
@@ -225,6 +368,7 @@ pub fn observe(app: &AppHandle, player: &PlayerState) {
     if history_changed {
         if let Some(track) = player.current() {
             let entry = SongEntry {
+                entry_id: None,
                 song: SongRow {
                     id: track.id.clone(),
                     catalog_id: Some(track.id.clone()),
@@ -236,6 +380,7 @@ pub fn observe(app: &AppHandle, player: &PlayerState) {
                 },
                 source: settings.source,
                 context: source_context(settings.source, &settings),
+                playback_route: None,
             };
             inner.saved.snapshot.history.insert(0, entry);
             inner.saved.snapshot.history.truncate(HISTORY_LIMIT);
@@ -290,12 +435,19 @@ pub fn qol_navigation_set(app: AppHandle, value: Value) -> Result<(), String> {
     changed(&app);
     Ok(())
 }
-fn validate_playlist_sources(
+fn bind_playlist_sources(
     existing: &[SongEntry],
-    incoming: &[SongEntry],
+    incoming: &mut [SongEntry],
     mut canonical: impl FnMut(&str) -> bool,
 ) -> Result<(), String> {
-    let entries: Vec<_> = existing.iter().chain(incoming).collect();
+    if let Some(binding) = existing.iter().find(|entry| !canonical(&entry.song.id)) {
+        // Canonical recordings can play with the destination's library binding.
+        for entry in incoming.iter_mut().filter(|entry| canonical(&entry.song.id)) {
+            entry.source = binding.source;
+            entry.context.clone_from(&binding.context);
+        }
+    }
+    let entries: Vec<_> = existing.iter().chain(incoming.iter()).collect();
     if entries.iter().all(|entry| canonical(&entry.song.id)) {
         return Ok(());
     }
@@ -331,9 +483,11 @@ fn set_favorites(
         snapshot
             .favorites
             .extend(songs.into_iter().map(|song| SongEntry {
+                entry_id: None,
                 song,
                 source,
                 context: context.clone(),
+                playback_route: None,
             }));
     }
 }
@@ -400,11 +554,22 @@ pub fn qol_playlist_add(
     let entries: Vec<_> = songs
         .into_iter()
         .map(|song| SongEntry {
+            entry_id: None,
             song,
             source,
             context: context.clone(),
+            playback_route: None,
         })
         .collect();
+    append_playlist(&app, name, playlist_id, entries)
+}
+
+fn append_playlist(
+    app: &AppHandle,
+    name: Option<String>,
+    playlist_id: Option<String>,
+    mut entries: Vec<SongEntry>,
+) -> Result<String, String> {
     let state = app.state::<State>();
     let mut inner = state.inner.lock().expect("listening state");
     let lists = &mut inner.saved.snapshot.playlists;
@@ -416,29 +581,147 @@ pub fn qol_playlist_add(
         if lists[index].songs.len() + entries.len() > 10000 {
             return Err("A playlist supports at most 10,000 tracks".into());
         }
-        validate_playlist_sources(&lists[index].songs, &entries, |id| canonical(&app, id))?;
+        bind_playlist_sources(&lists[index].songs, &mut entries, |id| canonical(app, id))?;
         index
     } else {
-        let name = name
-            .unwrap_or_else(|| "New playlist".into())
-            .trim()
-            .to_string();
-        if name.is_empty() || name.len() > 200 {
-            return Err("Enter a playlist name up to 200 characters".into());
-        }
+        let name = playlist_name(name.unwrap_or_else(|| "New playlist".into()))?;
         lists.push(LocalPlaylist {
             id: format!("qol:{}", uuid::Uuid::new_v4()),
             name,
+            description: String::new(),
+            cover_id: None,
             songs: vec![],
         });
         lists.len() - 1
     };
+    for entry in &mut entries {
+        entry.entry_id = Some(uuid::Uuid::new_v4().to_string());
+    }
     lists[index].songs.extend(entries);
     let id = lists[index].id.clone();
     drop(inner);
-    emit(&app);
+    emit(app);
     Ok(id)
 }
+
+#[tauri::command]
+pub async fn qol_playlist_edit(
+    app: AppHandle,
+    playlist_id: String,
+    name: String,
+    description: String,
+    cover: Option<Vec<u8>>,
+    remove_cover: bool,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cover = match (cover, remove_cover) {
+            (Some(_), true) => {
+                return Err("Choose a replacement cover or remove the existing one.".into());
+            }
+            (Some(bytes), false) => CoverEdit::Replace(normalize_cover(&bytes)?),
+            (None, true) => CoverEdit::Remove,
+            (None, false) => CoverEdit::Keep,
+        };
+        let state = app.state::<State>();
+        let path = state
+            .path
+            .as_deref()
+            .ok_or("Playlist storage is unavailable.")?;
+        {
+            let _io = state.io.lock().expect("listening persistence");
+            let mut inner = state.inner.lock().expect("listening state");
+            persist_playlist_edit(path, &mut inner.saved, &playlist_id, name, description, cover)?;
+        }
+        emit(&app);
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Could not save the playlist changes.".to_string())?
+}
+
+#[tauri::command]
+pub async fn qol_playlist_remove_song(
+    app: AppHandle,
+    playlist_id: String,
+    entry_id: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<State>();
+        let path = state
+            .path
+            .as_deref()
+            .ok_or("Playlist storage is unavailable.")?;
+        {
+            let _io = state.io.lock().expect("listening persistence");
+            let mut inner = state.inner.lock().expect("listening state");
+            persist_playlist_removal(path, &mut inner.saved, &playlist_id, &entry_id)?;
+        }
+        emit(&app);
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Could not remove the track from the playlist.".to_string())?
+}
+
+fn persist_playlist_removal(
+    path: &Path,
+    saved: &mut Saved,
+    playlist_id: &str,
+    entry_id: &str,
+) -> Result<(), String> {
+    let index = saved
+        .snapshot
+        .playlists
+        .iter()
+        .position(|playlist| playlist.id == playlist_id)
+        .ok_or("Playlist no longer exists.")?;
+    let songs = &mut saved.snapshot.playlists[index].songs;
+    let Some(position) = songs
+        .iter()
+        .position(|entry| entry.entry_id.as_deref() == Some(entry_id))
+    else {
+        return Ok(());
+    };
+    let removed = songs.remove(position);
+    if let Err(error) = write(path, saved) {
+        saved.snapshot.playlists[index].songs.insert(position, removed);
+        tracing::warn!(%error, "could not persist playlist removal");
+        return Err("Could not remove the track from the playlist.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn qol_playlist_add_discovered(
+    app: AppHandle,
+    playlist_id: Option<String>,
+    name: Option<String>,
+    track: crate::soundcloud::Track,
+) -> Result<String, String> {
+    let (track, route) = {
+        let imports = app.state::<crate::import::State>();
+        let mut db = imports
+            .db
+            .lock()
+            .map_err(|_| "The library is unavailable.")?;
+        crate::soundcloud_playback::save_discovered_track(&mut db, track)?
+    };
+    let settings = app
+        .state::<AppState>()
+        .settings
+        .lock()
+        .expect("settings")
+        .clone();
+    let entry = SongEntry {
+        entry_id: None,
+        song: track.into(),
+        source: settings.source,
+        context: source_context(settings.source, &settings),
+        playback_route: Some(route),
+    };
+    append_playlist(&app, name, playlist_id, vec![entry])
+}
+
 fn tracks(app: &AppHandle, songs: Vec<SongRow>, source: Source) -> Result<Vec<Track>, String> {
     if songs.len() > 10000 {
         return Err("Select at most 10,000 tracks".into());
@@ -473,9 +756,18 @@ pub fn qol_play(
     source: Source,
     start_index: Option<usize>,
     context: Option<String>,
+    playback_routes: Option<Vec<Option<Route>>>,
 ) -> Result<(), String> {
     let canonical_queue = !songs.is_empty() && songs.iter().all(|s| canonical(&app, &s.id));
-    let tracks = tracks(&app, songs, source)?;
+    let mut tracks = tracks(&app, songs, source)?;
+    if let Some(routes) = playback_routes {
+        if routes.len() != tracks.len() {
+            return Err("Playback routes must match the selected tracks.".into());
+        }
+        for (track, route) in tracks.iter_mut().zip(routes) {
+            track.playback_route = route;
+        }
+    }
     if tracks.is_empty() {
         return Err("No tracks selected".into());
     }
@@ -598,8 +890,114 @@ pub fn qol_reveal(app: AppHandle, song: SongRow, source: Source) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_playlists_load_without_description_or_cover() {
+        let saved = decode(r#"{"snapshot":{"playlists":[{"id":"qol:old","name":"Old mix","songs":[]} ]}}"#);
+        let playlist = &saved.snapshot.playlists[0];
+        assert_eq!(playlist.name, "Old mix");
+        assert!(playlist.description.is_empty());
+        assert!(playlist.cover_id.is_none());
+    }
+
+    #[test]
+    fn playlist_metadata_and_cover_are_replaced_together() {
+        let path =
+            std::env::temp_dir().join(format!("capsule-playlist-{}.sqlite3", uuid::Uuid::new_v4()));
+        let mut saved = Saved::default();
+        saved.snapshot.playlists.push(LocalPlaylist {
+            id: "qol:mix".into(),
+            name: "Old".into(),
+            songs: vec![entry("one", Source::Local, None)],
+            description: String::new(),
+            cover_id: None,
+        });
+        let png = encode_cover(image::DynamicImage::new_rgba8(2, 2)).unwrap();
+        persist_playlist_edit(
+            &path,
+            &mut saved,
+            "qol:mix",
+            "New".into(),
+            "Songs for tonight".into(),
+            CoverEdit::Replace(png.clone()),
+        )
+        .unwrap();
+        let playlist = &read(&path).snapshot.playlists[0];
+        let first_cover = playlist.cover_id.as_deref().unwrap();
+        assert_eq!(playlist.name, "New");
+        assert_eq!(playlist.description, "Songs for tonight");
+        assert_eq!(playlist.songs[0].song.id, "one");
+        assert_eq!(read_playlist_cover(&path, first_cover), Some(png));
+
+        persist_playlist_edit(
+            &path,
+            &mut saved,
+            "qol:mix",
+            "Renamed".into(),
+            String::new(),
+            CoverEdit::Keep,
+        )
+        .unwrap();
+        assert_eq!(
+            read(&path).snapshot.playlists[0].cover_id.as_deref(),
+            Some(first_cover)
+        );
+
+        let replacement = encode_cover(image::DynamicImage::new_rgba8(4, 4)).unwrap();
+        assert!(persist_playlist_edit(
+            path.parent().unwrap(),
+            &mut saved,
+            "qol:mix",
+            "Failed replacement".into(),
+            String::new(),
+            CoverEdit::Replace(replacement.clone()),
+        )
+        .is_err());
+        assert_eq!(saved.snapshot.playlists[0].name, "Renamed");
+        assert_eq!(
+            saved.snapshot.playlists[0].cover_id.as_deref(),
+            Some(first_cover)
+        );
+        assert!(read_playlist_cover(&path, first_cover).is_some());
+
+        persist_playlist_edit(
+            &path,
+            &mut saved,
+            "qol:mix",
+            "Renamed".into(),
+            String::new(),
+            CoverEdit::Replace(replacement.clone()),
+        )
+        .unwrap();
+        let stored = read(&path);
+        let second_cover = stored.snapshot.playlists[0].cover_id.as_deref().unwrap();
+        assert_ne!(first_cover, second_cover);
+        assert_eq!(read_playlist_cover(&path, first_cover), None);
+        assert_eq!(read_playlist_cover(&path, second_cover), Some(replacement));
+
+        persist_playlist_edit(
+            &path,
+            &mut saved,
+            "qol:mix",
+            "Renamed".into(),
+            String::new(),
+            CoverEdit::Remove,
+        )
+        .unwrap();
+        assert!(read(&path).snapshot.playlists[0].cover_id.is_none());
+        assert_eq!(read_playlist_cover(&path, second_cover), None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn invalid_and_oversized_covers_are_rejected() {
+        assert!(normalize_cover(b"this is not an image").is_err());
+        let oversized = encode_cover(image::DynamicImage::new_rgba8(513, 2)).unwrap();
+        assert!(normalize_cover(&oversized).is_err());
+    }
     fn entry(id: &str, source: Source, context: Option<&str>) -> SongEntry {
         SongEntry {
+            entry_id: None,
             song: SongRow {
                 id: id.into(),
                 catalog_id: None,
@@ -611,28 +1009,37 @@ mod tests {
             },
             source,
             context: context.map(str::to_owned),
+            playback_route: None,
         }
     }
     #[test]
     fn mixed_playlist_sources_and_accounts_are_rejected_except_all_canonical() {
         let local = entry("one", Source::Local, None);
         let youtube = entry("two", Source::Youtube, None);
-        assert!(validate_playlist_sources(
+        assert!(bind_playlist_sources(
             std::slice::from_ref(&local),
-            std::slice::from_ref(&youtube),
+            &mut [youtube.clone()],
             |_| false
         )
         .is_err());
-        assert!(validate_playlist_sources(&[local], &[youtube], |_| true).is_ok());
+        assert!(bind_playlist_sources(&[local], &mut [youtube], |_| true).is_ok());
         let one = entry("one", Source::Navidrome, Some("server1"));
         let two = entry("two", Source::Navidrome, Some("server2"));
-        assert!(validate_playlist_sources(std::slice::from_ref(&one), &[two], |_| false).is_err());
-        assert!(validate_playlist_sources(
+        assert!(bind_playlist_sources(std::slice::from_ref(&one), &mut [two], |_| false).is_err());
+        assert!(bind_playlist_sources(
             std::slice::from_ref(&one),
-            std::slice::from_ref(&one),
+            &mut [one.clone()],
             |_| false
         )
         .is_ok());
+    }
+    #[test]
+    fn canonical_additions_use_the_destination_playlist_account() {
+        let existing = entry("server-song", Source::Navidrome, Some("saved-account"));
+        let mut incoming = [entry("discovered", Source::Local, None)];
+        bind_playlist_sources(&[existing], &mut incoming, |id| id == "discovered").unwrap();
+        assert_eq!(incoming[0].source, Source::Navidrome);
+        assert_eq!(incoming[0].context.as_deref(), Some("saved-account"));
     }
     #[test]
     fn batch_favorites_deduplicates_and_removes_original_context() {
@@ -664,6 +1071,42 @@ mod tests {
     fn malformed_persistence_is_ignored() {
         assert!(decode("not json").session.is_none());
     }
+
+    #[test]
+    fn removes_one_legacy_playlist_occurrence_and_persists_the_result() {
+        let path = std::env::temp_dir().join(format!(
+            "capsule-playlist-removal-{}.sqlite3",
+            uuid::Uuid::new_v4()
+        ));
+        let song = entry("repeated-song", Source::Local, None);
+        let mut saved = Saved::default();
+        saved.snapshot.playlists.push(LocalPlaylist {
+            id: "qol:mix".into(),
+            name: "Mix".into(),
+            description: String::new(),
+            cover_id: None,
+            songs: vec![song.clone(), song],
+        });
+        write(&path, &saved).unwrap();
+        let mut saved = read(&path);
+        let ids: Vec<_> = saved.snapshot.playlists[0]
+            .songs
+            .iter()
+            .map(|song| song.entry_id.clone().unwrap())
+            .collect();
+        assert_ne!(ids[0], ids[1]);
+        assert!(
+            persist_playlist_removal(&path.join("invalid"), &mut saved, "qol:mix", &ids[1]).is_err()
+        );
+        assert_eq!(saved.snapshot.playlists[0].songs.len(), 2);
+        persist_playlist_removal(&path, &mut saved, "qol:mix", &ids[1]).unwrap();
+        persist_playlist_removal(&path, &mut saved, "qol:mix", &ids[1]).unwrap();
+        let restored = read(&path);
+        let songs = &restored.snapshot.playlists[0].songs;
+        assert_eq!(songs.len(), 1);
+        assert_eq!(songs[0].entry_id.as_deref(), Some(ids[0].as_str()));
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn source_context_does_not_route_other_providers() {
         let s = Saved {
@@ -685,6 +1128,7 @@ mod tests {
     #[test]
     fn history_is_bounded_when_reading_existing_state() {
         let entry = SongEntry {
+            entry_id: None,
             song: SongRow {
                 id: "one".into(),
                 catalog_id: None,
@@ -696,6 +1140,7 @@ mod tests {
             },
             source: Source::Local,
             context: None,
+            playback_route: None,
         };
         let mut saved = Saved::default();
         saved.snapshot.history = vec![entry; HISTORY_LIMIT + 20];
@@ -721,15 +1166,31 @@ mod tests {
     fn snapshot_round_trips_atomically() {
         let path =
             std::env::temp_dir().join(format!("capsule-qol-{}.sqlite3", uuid::Uuid::new_v4()));
+        let route = Route {
+            provider: crate::import::model::Platform::Soundcloud,
+            external_id: "123".into(),
+        };
+        let mut discovered = entry("discovered", Source::Local, None);
+        discovered.playback_route = Some(route.clone());
         let saved = Saved {
             snapshot: Snapshot {
                 navigation: serde_json::json!({"view":"songs"}),
+                playlists: vec![LocalPlaylist {
+                    id: "qol:mix".into(),
+                    name: "Mix".into(),
+                    description: String::new(),
+                    cover_id: None,
+                    songs: vec![discovered, entry("imported", Source::Local, None)],
+                }],
                 ..Snapshot::default()
             },
             ..Saved::default()
         };
         write(&path, &saved).unwrap();
-        assert_eq!(read(&path).snapshot.navigation, saved.snapshot.navigation);
+        let restored = read(&path).snapshot;
+        assert_eq!(restored.navigation, saved.snapshot.navigation);
+        assert_eq!(restored.playlists[0].songs[0].playback_route, Some(route));
+        assert_eq!(restored.playlists[0].songs[1].playback_route, None);
         std::fs::remove_file(path).unwrap();
     }
 }

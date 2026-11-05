@@ -2,6 +2,20 @@ use super::*;
 use crate::import::model::*;
 use uuid::Uuid;
 
+impl From<CapsuleTrack> for SongRow {
+    fn from(track: CapsuleTrack) -> Self {
+        Self {
+            id: track.id.clone(),
+            catalog_id: Some(track.id),
+            name: track.metadata.title,
+            artist_name: track.metadata.artists.join(", "),
+            album_name: track.metadata.album.unwrap_or_default(),
+            duration_ms: track.metadata.duration_ms.unwrap_or(0),
+            artwork_url: track.metadata.artwork_url,
+        }
+    }
+}
+
 fn invalid(message: impl Into<String>) -> DbError {
     DbError::Import(message.into())
 }

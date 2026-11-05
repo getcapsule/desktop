@@ -1,12 +1,17 @@
-import { useEffect, useRef, useState } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
 import { DownloadButton } from './Downloads'
+import { ListeningContext } from './ListeningTools'
+import { PlaylistDialog } from './PlaylistDialog'
 import { discover, type DiscoverAlbum, type DiscoverArtist, type DiscoverTrack, type SearchKind, type SearchResults } from '../lib/discover-ipc'
+import { qol } from '../lib/qol-ipc'
 
 const EMPTY: SearchResults = { tracks: [], artists: [], albums: [] }
 const button = 'rounded border border-rule px-3 py-1.5 text-xs transition-colors hover:border-muted focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40'
 type Detail = { kind: 'artist' | 'album'; id: string; title: string }
 
 export function Discover({ onPlayed }: { onPlayed?: () => void } = {}) {
+  const listening = useContext(ListeningContext)
+  const [playlistTrack, setPlaylistTrack] = useState<DiscoverTrack | null>(null)
   const [query, setQuery] = useState('')
   const [submitted, setSubmitted] = useState('')
   const [kind, setKind] = useState<SearchKind>('tracks')
@@ -108,11 +113,18 @@ export function Discover({ onPlayed }: { onPlayed?: () => void } = {}) {
         <div className="min-w-0 flex-1"><p className="truncate text-sm">{track.title}</p><p className="truncate text-xs text-muted">{track.artist}{track.album ? ` · ${track.album}` : ''}</p></div>
         <span className="font-mono text-[10px] text-muted">{Math.floor(track.duration_ms / 60000)}:{String(Math.floor(track.duration_ms / 1000) % 60).padStart(2, '0')}</span>
         <button aria-label={`Play ${track.title}`} className={button} disabled={playing} onClick={() => void play(index)}>Play</button>
+        {listening && <button aria-label={`Add ${track.title} to playlist`} aria-haspopup="dialog" className={button} onClick={() => setPlaylistTrack(track)}>Add to playlist</button>}
         <DownloadButton requests={[{ kind: 'soundcloud', track }]} onProblem={setProblem} />
       </div>)}
       {!loading && !detail && kind === 'artists' && results.artists.map(artist => <button key={artist.id} className="row flex min-h-14 w-full items-center gap-3 rounded px-2 py-2 text-left" onClick={() => void open(artist, 'artist')}><Artwork url={artist.artwork_url} /><span className="min-w-0 flex-1 truncate text-sm">{artist.name}</span><span className="text-xs text-muted">View songs →</span></button>)}
       {!loading && !detail && kind === 'albums' && results.albums.map(album => <button key={album.id} className="row flex min-h-14 w-full items-center gap-3 rounded px-2 py-2 text-left" onClick={() => void open(album, 'album')}><Artwork url={album.artwork_url} /><span className="min-w-0 flex-1"><span className="block truncate text-sm">{album.title}</span><span className="block truncate text-xs text-muted">{album.artist}</span></span><span className="text-xs text-muted">{album.track_count} tracks →</span></button>)}
     </div>
+    {listening && playlistTrack && <PlaylistDialog
+      description={playlistTrack.title}
+      playlists={listening.snapshot.playlists}
+      onSave={(id, name) => qol.playlistAddDiscovered(playlistTrack, id, name)}
+      onClose={() => setPlaylistTrack(null)}
+    />}
     {canPage && submitted && <footer className="flex shrink-0 justify-between border-t border-rule px-4 py-2">
       <button className={button} disabled={loading || pageOffset === 0} onClick={() => page(Math.max(0, pageOffset - 30))}>Previous</button>
       <button className={button} disabled={loading || count < 30 || pageOffset >= 9990} onClick={() => page(pageOffset + 30)}>Next</button>

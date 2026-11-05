@@ -796,18 +796,7 @@ pub fn playlist_songs(
         db.import_entries(id)
             .map_err(err)?
             .into_iter()
-            .map(|entry| {
-                let track = entry.track;
-                crate::db::SongRow {
-                    id: track.id.clone(),
-                    catalog_id: Some(track.id),
-                    name: track.metadata.title,
-                    artist_name: track.metadata.artists.join(", "),
-                    album_name: track.metadata.album.unwrap_or_default(),
-                    duration_ms: track.metadata.duration_ms.unwrap_or(0),
-                    artwork_url: track.metadata.artwork_url,
-                }
-            })
+            .map(|entry| entry.track.into())
             .collect(),
     ))
 }

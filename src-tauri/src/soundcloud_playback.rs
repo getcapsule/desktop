@@ -252,34 +252,7 @@ fn prepare_queue(
     tracks
         .into_iter()
         .map(|track| {
-            if track.id.is_empty()
-                || track.id.len() > 20
-                || !track.id.bytes().all(|b| b.is_ascii_digit())
-            {
-                return Err("Invalid SoundCloud track.".to_string());
-            }
-            let playback_route = crate::import::playback::Route {
-                provider: Platform::Soundcloud,
-                external_id: track.id.clone(),
-            };
-            let saved = db
-                .save_source_track(&ImportedTrack {
-                    origin: Origin {
-                        platform: Platform::Soundcloud,
-                        external_id: track.id,
-                        url: track.permalink_url,
-                    },
-                    metadata: Metadata {
-                        title: track.title,
-                        artists: vec![track.artist],
-                        album: track.album,
-                        duration_ms: Some(track.duration_ms),
-                        artwork_url: track.artwork_url,
-                        isrc: None,
-                        explicit: None,
-                    },
-                })
-                .map_err(|_| "Could not save the searched track.".to_string())?;
+            let (saved, playback_route) = save_discovered_track(db, track)?;
             Ok(crate::player::Track {
                 id: saved.id,
                 title: saved.metadata.title,
@@ -290,6 +263,40 @@ fn prepare_queue(
             })
         })
         .collect()
+}
+
+pub(crate) fn save_discovered_track(
+    db: &mut crate::db::Db,
+    track: crate::soundcloud::Track,
+) -> Result<(crate::import::model::CapsuleTrack, crate::import::playback::Route), String> {
+    if track.id.is_empty()
+        || track.id.len() > 20
+        || !track.id.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("Invalid SoundCloud track.".into());
+    }
+    let route = crate::import::playback::Route {
+        provider: Platform::Soundcloud,
+        external_id: track.id.clone(),
+    };
+    let saved = db.save_source_track(&ImportedTrack {
+        origin: Origin {
+            platform: Platform::Soundcloud,
+            external_id: track.id,
+            url: track.permalink_url,
+        },
+        metadata: Metadata {
+            title: track.title,
+            artists: vec![track.artist],
+            album: track.album,
+            duration_ms: Some(track.duration_ms),
+            artwork_url: track.artwork_url,
+            isrc: None,
+            explicit: None,
+        },
+    })
+    .map_err(|_| "Could not save the searched track.".to_string())?;
+    Ok((saved, route))
 }
 
 #[cfg(test)]

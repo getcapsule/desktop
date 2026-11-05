@@ -4,6 +4,7 @@ import { formatTime, type PlayerState, type SongRow, type Source } from '../lib/
 import { qol, type QolSnapshot, type SongEntry } from '../lib/qol-ipc'
 import { playlistContext } from '../lib/qol'
 import { VirtualList } from './VirtualList'
+import { PlaylistDialog } from './PlaylistDialog'
 import { queueDownloads, songDownloadRequests } from '../lib/download-actions'
 
 export const ListeningContext = createContext<{
@@ -13,11 +14,15 @@ export const ListeningContext = createContext<{
 } | null>(null)
 const button = 'rounded border border-rule px-2 py-1 text-[11px] text-muted hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-accent disabled:opacity-40'
 
-export function TrackTools({ songs, source, context }: { songs: SongRow[]; source?: Source; context?: string }) {
+export function TrackTools({ songs, source, context, onRemoveFromPlaylist }: {
+  songs: SongRow[]
+  source?: Source
+  context?: string
+  onRemoveFromPlaylist?: () => Promise<void>
+}) {
   const listening = useContext(ListeningContext)
   const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null)
-  const [name, setName] = useState('')
-  const [playlist, setPlaylist] = useState('')
+  const [addingToPlaylist, setAddingToPlaylist] = useState(false)
   const [info, setInfo] = useState(false)
   const trigger = useRef<HTMLButtonElement>(null)
   const menu = useRef<HTMLDivElement>(null)
@@ -55,6 +60,8 @@ export function TrackTools({ songs, source, context }: { songs: SongRow[]; sourc
     {anchor && createPortal(<div ref={menu} role="menu" aria-label="Track actions" className="fixed z-[70] max-h-[85vh] w-64 overflow-y-auto rounded border border-rule bg-ground p-1 shadow-xl" style={anchor} onClick={e => e.stopPropagation()}>
       {action('Play next', () => qol.add(songs, selectedSource, true, bindingContext))}
       {action('Add to queue', () => qol.add(songs, selectedSource, false, bindingContext))}
+      {action('Add to playlist', () => setAddingToPlaylist(true))}
+      {onRemoveFromPlaylist && action('Remove from playlist', onRemoveFromPlaylist)}
       {action(songs.length === 1 ? 'Download track' : `Download ${songs.length} tracks`, () => queueDownloads(songDownloadRequests(songs, selectedSource, bindingContext)))}
       {action(favorite && songs.length === 1 ? 'Remove from favorites' : 'Add to favorites', () => qol.favorites(songs, selectedSource, !(favorite && songs.length === 1), bindingContext))}
       {songs.length === 1 && <>
@@ -65,11 +72,13 @@ export function TrackTools({ songs, source, context }: { songs: SongRow[]; sourc
         <button role="menuitem" className="block w-full rounded px-3 py-2 text-left text-xs hover:bg-ink/10" onClick={() => setInfo(v => !v)}>Track information</button>
         {info && <dl className="break-words border-y border-rule px-3 py-2 text-[11px] text-muted"><dt>Title</dt><dd className="mb-2 text-ink">{song.name}</dd><dt>Artist / album</dt><dd className="mb-2 text-ink">{song.artist_name} · {song.album_name}</dd><dt>Playback source / duration</dt><dd className="mb-2 text-ink">{selectedSource} · {formatTime(song.duration_ms)}</dd><dt>Track ID</dt><dd>{song.id}</dd></dl>}
       </>}
-      <div className="mt-1 space-y-2 border-t border-rule p-2">
-        {listening.snapshot.playlists.length > 0 && <div className="flex gap-1"><select aria-label="Add to playlist" value={playlist} onChange={e => setPlaylist(e.target.value)} className="min-w-0 flex-1 rounded border border-rule bg-ground p-1 text-xs"><option value="">Choose playlist</option>{listening.snapshot.playlists.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select><button className={button} disabled={!playlist} onClick={() => run(() => qol.playlistAdd(songs, selectedSource, playlist, null, bindingContext))}>Add</button></div>}
-        <form className="flex gap-1" onSubmit={e => { e.preventDefault(); if (name.trim()) run(() => qol.playlistAdd(songs, selectedSource, null, name.trim(), bindingContext)) }}><input aria-label="New playlist name" value={name} onChange={e => setName(e.target.value)} placeholder="New playlist name" maxLength={200} className="min-w-0 flex-1 rounded border border-rule bg-ground px-2 py-1 text-xs" /><button className={button} disabled={!name.trim()}>Create</button></form>
-      </div>
     </div>, document.body)}
+    {addingToPlaylist && <PlaylistDialog
+      description={songs.length === 1 ? song.name : `${songs.length} tracks`}
+      playlists={listening.snapshot.playlists}
+      onSave={(id, name) => qol.playlistAdd(songs, selectedSource, id, name, bindingContext)}
+      onClose={() => setAddingToPlaylist(false)}
+    />}
   </span>
 }
 

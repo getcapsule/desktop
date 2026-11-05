@@ -26,8 +26,8 @@ pub struct AvailableRoute {
 const DEFAULT_PRIORITY: [Platform; 4] = [
     Platform::Local,
     Platform::Navidrome,
-    Platform::Soundcloud,
     Platform::Youtube,
+    Platform::Soundcloud,
 ];
 
 /// An explicit override is strict: unavailable selections require user action.
@@ -85,8 +85,11 @@ fn allows_youtube_recovery(
     requested: Option<&Route>,
     saved: Option<Platform>,
     enabled: bool,
+    denied_soundcloud: Option<&Route>,
 ) -> bool {
-    requested.is_none() && enabled && saved.is_none_or(|source| source == Platform::Youtube)
+    enabled
+        && saved.is_none_or(|source| source == Platform::Youtube)
+        && (requested.is_none() || requested == denied_soundcloud)
 }
 
 #[derive(Default)]
@@ -102,6 +105,42 @@ struct Recovery {
     tried: HashSet<String>,
     busy: bool,
     searched: bool,
+    denied_soundcloud: Option<Route>,
+    fallback: Option<Route>,
+}
+impl Recovery {
+    fn reset(&mut self, track_id: &str) {
+        *self = Self {
+            track: track_id.into(),
+            generation: self.generation.wrapping_add(1),
+            ..Self::default()
+        };
+    }
+
+    fn record_failure(&mut self, route: Route, message: &str) {
+        if route.provider == Platform::Youtube {
+            self.tried.insert(route.external_id);
+            self.fallback = None;
+        } else if route.provider == Platform::Soundcloud
+            && message == crate::soundcloud::FULL_PLAYBACK_DENIED
+        {
+            self.denied_soundcloud = Some(route);
+        }
+    }
+
+    fn after_denial(&self, selected: Option<Route>, requested: Option<&Route>) -> Option<Route> {
+        let denied = self.denied_soundcloud.as_ref();
+        if denied.is_some_and(|route| {
+            requested == Some(route)
+                || (requested.is_none()
+                    && selected.as_ref().is_some_and(|selected| {
+                        selected == route || selected.provider == Platform::Youtube
+                    }))
+        }) {
+            return self.fallback.clone();
+        }
+        selected
+    }
 }
 struct Session {
     track_id: String,
@@ -109,13 +148,11 @@ struct Session {
 }
 
 fn reset_recovery(playback: &State, track_id: &str) {
-    let mut recovery = playback.recovery.lock().expect("playback recovery");
-    let generation = recovery.generation.wrapping_add(1);
-    *recovery = Recovery {
-        track: track_id.into(),
-        generation,
-        ..Default::default()
-    };
+    playback
+        .recovery
+        .lock()
+        .expect("playback recovery")
+        .reset(track_id);
 }
 
 /// The native mixer already crossed the sample boundary; update ownership only.
@@ -293,7 +330,7 @@ pub fn report_native_error(app: &AppHandle, state: &AppState, error: &str) {
 }
 
 /// Native failures exhaust plausible recordings before asking the listener.
-pub fn report_native_failure(app: &AppHandle, track_id: &str, _message: &str) -> bool {
+pub fn report_native_failure(app: &AppHandle, track_id: &str, message: &str) -> bool {
     let Some(playback) = app.try_state::<State>() else {
         return false;
     };
@@ -312,13 +349,9 @@ pub fn report_native_failure(app: &AppHandle, track_id: &str, _message: &str) ->
     {
         let mut recovery = playback.recovery.lock().expect("playback recovery");
         if recovery.track != track_id {
-            recovery.track = track_id.into();
-            recovery.tried.clear();
-            recovery.searched = false;
+            recovery.reset(track_id);
         }
-        if route.provider == Platform::Youtube {
-            recovery.tried.insert(route.external_id);
-        }
+        recovery.record_failure(route, message);
     }
     start_automatic_playback(app, track_id)
 }
@@ -327,7 +360,12 @@ fn start_automatic_playback(app: &AppHandle, track_id: &str) -> bool {
     let (revision, index, requested) = {
         let state = app.state::<AppState>();
         let player = state.player.lock().expect("player mutex");
-        if matches!(player.state().status, Status::Ended | Status::Idle) {
+        if matches!(player.state().status, Status::Ended | Status::Idle)
+            || player
+                .state()
+                .current()
+                .is_none_or(|track| track.id != track_id)
+        {
             return false;
         }
         (
@@ -345,24 +383,21 @@ fn start_automatic_playback(app: &AppHandle, track_id: &str) -> bool {
     let Some(imports) = app.try_state::<super::State>() else {
         return false;
     };
-    {
-        let db = imports.db.lock().expect("import db");
-        if !allows_youtube_recovery(
-            requested.as_ref(),
-            db.source_preference(track_id).ok().flatten(),
-            db.meta("youtube_native_enabled").ok().flatten().as_deref() != Some("false"),
-        ) {
-            return false;
-        }
-    }
     let generation = {
         let mut recovery = playback.recovery.lock().expect("playback recovery");
         if recovery.track != track_id {
-            recovery.track = track_id.into();
-            recovery.tried.clear();
-            recovery.searched = false;
-            recovery.busy = false;
-            recovery.generation = recovery.generation.wrapping_add(1);
+            recovery.reset(track_id);
+        }
+        {
+            let db = imports.db.lock().expect("import db");
+            if !allows_youtube_recovery(
+                requested.as_ref(),
+                db.source_preference(track_id).ok().flatten(),
+                db.meta("youtube_native_enabled").ok().flatten().as_deref() != Some("false"),
+                recovery.denied_soundcloud.as_ref(),
+            ) {
+                return false;
+            }
         }
         if recovery.busy {
             return true;
@@ -502,8 +537,6 @@ fn start_automatic_playback(app: &AppHandle, track_id: &str) -> bool {
                 recovery.busy = false;
                 return;
             }
-            recovery.busy = false;
-            drop(recovery);
             if crate::youtube_native::send_if_current(
                 &app,
                 &track_id,
@@ -519,16 +552,22 @@ fn start_automatic_playback(app: &AppHandle, track_id: &str) -> bool {
                         .current()
                         .is_some_and(|track| track.id == track_id)
                 {
+                    let route = Route {
+                        provider: Platform::Youtube,
+                        external_id: candidate.external_id,
+                    };
+                    if recovery.denied_soundcloud.is_some() {
+                        recovery.fallback = Some(route.clone());
+                    }
                     *active = Some(Session {
                         track_id: track_id.clone(),
-                        route: Some(Route {
-                            provider: Platform::Youtube,
-                            external_id: candidate.external_id.clone(),
-                        }),
+                        route: Some(route),
                     });
                     player.set_playback_source(Some("youtube"), true);
                 }
             }
+            recovery.busy = false;
+            drop(recovery);
             crate::commands::publish(&app, &state);
             return;
         }
@@ -830,6 +869,21 @@ pub fn dispatch(app: &AppHandle, state: &AppState, commands: &[EngineCommand]) -
         available: youtube_enabled && strict_video_id(&mapping.external_id),
     }));
     let route = select_recording(&routes, preference, &priority, requested.as_ref());
+    let (route, allow_recovery) = {
+        let recovery = playback.recovery.lock().expect("playback recovery");
+        let allowed = allows_youtube_recovery(
+            requested.as_ref(),
+            preference,
+            youtube_enabled,
+            recovery.denied_soundcloud.as_ref(),
+        );
+        let route = if allowed {
+            recovery.after_denial(route, requested.as_ref())
+        } else {
+            route
+        };
+        (route, allowed)
+    };
     let Some(route) = route else {
         let resolution = imports
             .db
@@ -847,7 +901,7 @@ pub fn dispatch(app: &AppHandle, state: &AppState, commands: &[EngineCommand]) -
             track_id: track_id.clone(),
             route: None,
         });
-        if allows_youtube_recovery(requested.as_ref(), preference, youtube_enabled) {
+        if allow_recovery {
             if commands
                 .iter()
                 .any(|command| matches!(command, EngineCommand::Pause))
@@ -1029,23 +1083,50 @@ pub fn release(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn explicit_soundcloud_recording_never_recovers_to_a_youtube_match() {
-        let requested = super::Route {
-            provider: super::Platform::Soundcloud,
-            external_id: "42".into(),
-        };
-        assert!(!super::allows_youtube_recovery(
+    fn exact_soundcloud_recording_recovers_only_after_access_denial() {
+        let requested = route(Platform::Soundcloud, true, true).route;
+        let mut recovery = Recovery::default();
+        recovery.record_failure(requested.clone(), "connection lost");
+        assert!(!allows_youtube_recovery(
             Some(&requested),
             None,
-            true
+            true,
+            recovery.denied_soundcloud.as_ref(),
         ));
-        assert!(!super::allows_youtube_recovery(
+        recovery.record_failure(requested.clone(), crate::soundcloud::FULL_PLAYBACK_DENIED);
+        let denied = recovery.denied_soundcloud.as_ref();
+        assert!(allows_youtube_recovery(Some(&requested), None, true, denied));
+        assert!(!allows_youtube_recovery(Some(&requested), None, false, denied));
+        assert!(!allows_youtube_recovery(
             Some(&requested),
-            Some(super::Platform::Youtube),
-            true
+            Some(Platform::Local),
+            true,
+            denied,
         ));
-        assert!(super::allows_youtube_recovery(None, None, true));
-        assert!(!super::allows_youtube_recovery(None, None, false));
+        let different = Route {
+            external_id: "different".into(),
+            ..requested
+        };
+        assert!(!allows_youtube_recovery(Some(&different), None, true, denied));
+        assert!(allows_youtube_recovery(None, None, true, None));
+        assert!(!allows_youtube_recovery(None, None, false, None));
+    }
+
+    #[test]
+    fn playback_controls_keep_the_verified_fallback_after_soundcloud_denial() {
+        let requested = route(Platform::Soundcloud, true, true).route;
+        let youtube = route(Platform::Youtube, true, true).route;
+        let mut recovery = Recovery::default();
+        recovery.record_failure(requested.clone(), crate::soundcloud::FULL_PLAYBACK_DENIED);
+        let select = |recovery: &Recovery| {
+            recovery.after_denial(Some(requested.clone()), Some(&requested))
+        };
+        // Pause and seek can reach dispatch while the alternate recording is still resolving.
+        assert_eq!(select(&recovery), None);
+        recovery.fallback = Some(youtube.clone());
+        assert_eq!(select(&recovery), Some(youtube));
+        recovery.reset("next-occurrence");
+        assert_eq!(select(&recovery), Some(requested));
     }
     #[test]
     fn native_errors_identify_the_failure_without_exposing_raw_details() {
@@ -1104,6 +1185,23 @@ mod tests {
                 .unwrap()
                 .provider,
             Platform::Youtube
+        );
+    }
+    #[test]
+    fn youtube_is_the_default_online_recording() {
+        let routes = [
+            route(Platform::Soundcloud, true, true),
+            route(Platform::Youtube, true, true),
+        ];
+        assert_eq!(
+            select_route(&routes, None, &[]).unwrap().provider,
+            Platform::Youtube
+        );
+        assert_eq!(
+            select_route(&routes, None, &[Platform::Soundcloud])
+                .unwrap()
+                .provider,
+            Platform::Soundcloud
         );
     }
     #[test]

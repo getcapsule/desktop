@@ -33,8 +33,162 @@ beforeEach(() => {
     }
   })
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  Object.defineProperty(HTMLDialogElement.prototype, 'showModal', {
+    configurable: true,
+    value(this: HTMLDialogElement) { this.setAttribute('open', '') },
+  })
+  Object.defineProperty(HTMLDialogElement.prototype, 'close', {
+    configurable: true,
+    value(this: HTMLDialogElement) { this.removeAttribute('open') },
+  })
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+  Reflect.deleteProperty(HTMLDialogElement.prototype, 'showModal')
+  Reflect.deleteProperty(HTMLDialogElement.prototype, 'close')
+  vi.unstubAllGlobals()
+})
+
+it('edits a saved playlist name, description, and cover from its detail view', async () => {
+  let playlist = { id: 'qol:editable', name: 'Old mix', description: '', cover_id: null as string | null, songs: [{ song: songs[0], source: 'local' }] }
+  const snapshot = () => ({ favorites: [], history: [], playlists: [playlist], navigation: {} })
+  const original = boundary.invoke.getMockImplementation()!
+  boundary.invoke.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === 'qol_snapshot') return snapshot()
+    if (command === 'qol_playlist_edit') {
+      const edit = args as { name: string; description: string; cover: number[] | null; removeCover: boolean }
+      playlist = { ...playlist, name: edit.name, description: edit.description, cover_id: edit.removeCover ? null : 'qol-cover:test' }
+      boundary.handlers.get('qol://updated')?.({ payload: snapshot() })
+      return
+    }
+    return original(command, args)
+  })
+  const drawImage = vi.fn()
+  vi.stubGlobal('createImageBitmap', vi.fn(async () => ({ width: 1024, height: 512, close: vi.fn() })))
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+  vi.spyOn(HTMLCanvasElement.prototype, 'toBlob').mockImplementation(callback => callback(new Blob([new Uint8Array([1, 2, 3])])))
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: /^Playlists/ }))
+  click('Old mix')
+  click('Edit playlist')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Playlist name' }), { target: { value: 'Road trip' } })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Description' }), { target: { value: 'Songs for the drive.' } })
+  fireEvent.change(screen.getByLabelText('Cover image'), { target: { files: [new File(['image'], 'cover.webp', { type: 'image/webp' })] } })
+  click('Save changes')
+  expect(await screen.findByRole('heading', { name: 'Road trip' })).toBeDefined()
+  expect(screen.getByText('Songs for the drive.')).toBeDefined()
+  expect(screen.getByRole('img', { name: 'Playlist cover' }).getAttribute('src')).toContain('qol-cover:test')
+  expect(screen.getByText('First')).toBeDefined()
+  expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 512, 256)
+  expect(boundary.invoke).toHaveBeenCalledWith('qol_playlist_edit', { playlistId: 'qol:editable', name: 'Road trip', description: 'Songs for the drive.', cover: [1, 2, 3], removeCover: false })
+  click('Edit playlist')
+  click('Remove cover')
+  click('Save changes')
+  await waitFor(() => expect(screen.queryByRole('img', { name: 'Playlist cover' })).toBeNull())
+  expect(boundary.invoke).toHaveBeenCalledWith('qol_playlist_edit', { playlistId: 'qol:editable', name: 'Road trip', description: 'Songs for the drive.', cover: null, removeCover: true })
+})
+
+it('removes only the chosen occurrence from a playlist shown in reverse order', async () => {
+  const entries = ['first-entry', 'second-entry'].map(entry_id => ({ entry_id, song: { ...songs[0] }, source: 'local' }))
+  const snapshot = () => ({ favorites: [], history: [], playlists: [{ id: 'qol:mix', name: 'My mix', songs: [...entries] }], navigation: {} })
+  const original = boundary.invoke.getMockImplementation()!
+  boundary.invoke.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === 'qol_snapshot') return snapshot()
+    if (command === 'qol_playlist_remove_song') {
+      const { entryId } = args as { entryId: string }
+      entries.splice(entries.findIndex(entry => entry.entry_id === entryId), 1)
+      boundary.handlers.get('qol://updated')?.({ payload: snapshot() })
+      return
+    }
+    return original(command, args)
+  })
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: /^Playlists/ }))
+  click('My mix')
+  const tracks = await screen.findAllByRole('button', { name: 'More actions for First' })
+  expect(tracks).toHaveLength(2)
+  fireEvent.change(screen.getByRole('combobox', { name: 'Sort direction' }), { target: { value: 'desc' } })
+  fireEvent.click(screen.getAllByRole('button', { name: 'More actions for First' })[0]!)
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Remove from playlist' }))
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'More actions for First' })).toHaveLength(1))
+  expect(boundary.invoke).toHaveBeenCalledWith('qol_playlist_remove_song', { playlistId: 'qol:mix', entryId: 'second-entry' })
+  click('Back')
+  click(/^Songs/)
+  expect(await screen.findByRole('button', { name: /^FirstA & B/ })).toBeDefined()
+})
+
+it('creates an empty playlist from Playlists even with an empty library', async () => {
+  const original = boundary.invoke.getMockImplementation()!
+  boundary.invoke.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === 'library_counts') return { songs: 0, albums: 0, artists: 0, playlists: 0 }
+    if (command === 'qol_playlist_add') {
+      boundary.handlers.get('qol://updated')?.({ payload: { favorites: [], history: [], playlists: [{ id: 'qol:new', name: 'Evening mix', songs: [] }], navigation: {} } })
+      return 'qol:new'
+    }
+    return original(command, args)
+  })
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: /^Playlists/ }))
+  click('New playlist')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Playlist name' }), { target: { value: ' Evening mix ' } })
+  click('Create playlist')
+  expect(await screen.findByRole('button', { name: 'Evening mix' })).toBeDefined()
+  expect(boundary.invoke).toHaveBeenCalledWith('qol_playlist_add', { songs: [], source: 'local', playlistId: null, name: 'Evening mix', context: null })
+})
+
+it('adds a Discover result and an imported playlist song to the same local playlist', async () => {
+  const discovered = { id: '123', title: 'Discovered track', artist: 'Artist', artist_id: null, album: null, duration_ms: 1000, artwork_url: null, permalink_url: null }
+  const importedId = '45e8508d-cf1e-42c5-9a0a-83077b41befe'
+  const imported = { ...song(importedId, 'Imported track'), catalog_id: importedId }
+  const discoveredId = '7ea92f55-8cc7-49b6-bfb9-ed5a661f1af6'
+  const savedDiscovery = { ...song(discoveredId, discovered.title), catalog_id: discoveredId }
+  const route = { provider: 'soundcloud', external_id: discovered.id }
+  const entries: unknown[] = []
+  const snapshot = () => ({
+    favorites: [], history: [], navigation: {},
+    playlists: entries.length ? [{ id: 'qol:mix', name: 'My mix', songs: [...entries] }] : [],
+  })
+  const original = boundary.invoke.getMockImplementation()!
+  boundary.invoke.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === 'qol_snapshot') return snapshot()
+    if (command === 'discover_search') return { tracks: [discovered], artists: [], albums: [] }
+    if (command === 'library_playlists') return [{ id: 'imported', name: 'Imported playlist', artwork_url: null }]
+    if (command === 'library_playlist_songs') return [imported]
+    if (command === 'qol_playlist_add_discovered' || command === 'qol_playlist_add') {
+      entries.push(command === 'qol_playlist_add_discovered'
+        ? { song: savedDiscovery, source: 'local', playback_route: route }
+        : { song: imported, source: 'local' })
+      boundary.handlers.get('qol://updated')?.({ payload: snapshot() })
+      return 'qol:mix'
+    }
+    return original(command, args)
+  })
+  render(<App />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Discover' }))
+  fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Discovered track' } })
+  click('Search')
+  fireEvent.click(await screen.findByRole('button', { name: 'Add Discovered track to playlist' }))
+  fireEvent.change(screen.getByRole('textbox', { name: 'Playlist name' }), { target: { value: 'My mix' } })
+  click('Create and add')
+  await waitFor(() => expect(boundary.invoke).toHaveBeenCalledWith('qol_playlist_add_discovered', { track: discovered, playlistId: null, name: 'My mix' }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  click(/^Playlists/)
+  click('Imported playlist')
+  fireEvent.click(await screen.findByRole('button', { name: 'More actions for Imported track' }))
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Add to playlist' }))
+  fireEvent.change(await screen.findByRole('combobox', { name: 'Playlist' }), { target: { value: 'qol:mix' } })
+  click('Add to playlist')
+  await waitFor(() => expect(boundary.invoke).toHaveBeenCalledWith('qol_playlist_add', { songs: [imported], source: 'local', playlistId: 'qol:mix', name: null, context: null }))
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  click('Back')
+  click('My mix')
+  expect(await screen.findByText('Imported track')).toBeDefined()
+  fireEvent.doubleClick(await screen.findByRole('button', { name: /^Discovered trackA & B/ }))
+  await waitFor(() => expect(boundary.invoke).toHaveBeenCalledWith('qol_play', {
+    songs: [savedDiscovery, imported], source: 'local', startIndex: 0, context: null, playbackRoutes: [route, null],
+  }))
+})
 
 it('retries a missing cover when background metadata enrichment supplies artwork', async () => {
   render(<App />)

@@ -14,6 +14,7 @@ export function SongLine({
   onSelect,
   source,
   context,
+  onRemoveFromPlaylist,
   showCheckbox = true,
 }: {
   song: SongRow
@@ -25,6 +26,7 @@ export function SongLine({
   onSelect?: (shift: boolean, toggle: boolean) => void
   source?: Source
   context?: string
+  onRemoveFromPlaylist?: () => Promise<void>
   showCheckbox?: boolean
 }) {
   return (
@@ -68,7 +70,7 @@ export function SongLine({
       <span className="text-right data text-[10px] text-muted">
         {formatTime(song.duration_ms)}
       </span>
-      <TrackTools songs={[song]} source={source} context={context} />
+      <TrackTools songs={[song]} source={source} context={context} onRemoveFromPlaylist={onRemoveFromPlaylist} />
     </div>
   )
 }

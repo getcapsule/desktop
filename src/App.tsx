@@ -3,6 +3,7 @@ import { LIBRARY_ROW_HEIGHT, AlbumLine, Art, SongLine } from './components/Libra
 import { DetailView, SavedSongs, type LibraryDetail } from './components/LibraryViews'
 import { LibrarySort, SONG_SORTS, ALBUM_SORTS, ARTIST_SORTS } from './components/LibrarySort'
 import { Discover } from './components/Discover'
+import { PlaylistDialog, playlistButton } from './components/PlaylistDialog'
 import { Downloads } from './components/Downloads'
 import { useLibraryRows } from './lib/library-query'
 import { ListeningContext, QueueView, SelectionBar } from './components/ListeningTools'
@@ -61,6 +62,7 @@ export default function App() {
   const [artistName, setArtistName] = useState<string | null>(null)
   const [artistTab, setArtistTab] = useState<'songs' | 'albums'>('songs')
   const [playlists, setPlaylists] = useState<PlaylistRow[]>([])
+  const [creatingPlaylist, setCreatingPlaylist] = useState(false)
   const [counts, setCounts] = useState<LibraryCounts | null>(null)
   const [progress, setProgress] = useState<SyncProgress | null>(null)
   const [state, setState] = useState<PlayerState | null>(null)
@@ -176,12 +178,13 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      const target = e.target instanceof Element ? e.target : null
+      if (target?.closest('dialog[open]')) return
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setPaletteOpen((v) => !v)
         return
       }
-      const target = e.target instanceof Element ? e.target : null
       if (target?.closest('input,textarea,select,button,[contenteditable="true"],[role="menu"],[cmdk-root]') || paletteOpen) return
       const mod = e.ctrlKey || e.metaKey
       if (mod && e.key.toLowerCase() === 'f') { e.preventDefault(); searchInput.current?.focus(); return }
@@ -306,6 +309,7 @@ export default function App() {
             icon="playlists"
             on={view === 'playlists' && !results}
             onClick={() => {
+              setQuery('')
               setDetail(null)
               setArtistName(null)
               setView('playlists')
@@ -364,8 +368,10 @@ export default function App() {
                   <h1>{results ? 'Search results' : view === 'songs' ? 'Songs' : view === 'albums' ? 'Albums' : view === 'artists' ? 'Artists' : 'Playlists'}</h1>
                 </div>
                 {results && <span className="workspace-caption">Results for “{query.trim()}”</span>}
+                {view === 'playlists' && !results && <button className={playlistButton} aria-haspopup="dialog" onClick={() => setCreatingPlaylist(true)}>New playlist</button>}
               </div>
             )}
+            {creatingPlaylist && <PlaylistDialog onClose={() => setCreatingPlaylist(false)} onSave={(_, name) => qol.playlistAdd([], source, null, name)} />}
             {artistName && !detail && view === 'artists' && !results && <div className="border-b border-rule px-4 py-3">
               <button className="text-xs text-muted" onClick={() => setArtistName(null)}>Back</button>
               <h1 className="mt-2 text-sm font-semibold">{artistName}</h1>
@@ -389,10 +395,10 @@ export default function App() {
             ) : view === 'lyrics' && !results ? (
               <Lyrics state={state} />
             ) : detail && !results ? (
-              <DetailView detail={detail} query={query} sort={detailSort} onSort={setDetailSort} direction={detailDirection} onDirection={setDetailDirection} localEntries={listening.playlists.find(p => p.id === detail.id)?.songs} canPlay={canPlay} nowPlayingId={nowPlayingId} trackIdOf={trackIdOf} onBack={() => { setDetail(null); setQuery('') }} onProblem={setProblem} />
+              <DetailView detail={detail} query={query} sort={detailSort} onSort={setDetailSort} direction={detailDirection} onDirection={setDetailDirection} localPlaylist={listening.playlists.find(p => p.id === detail.id)} canPlay={canPlay} nowPlayingId={nowPlayingId} trackIdOf={trackIdOf} onBack={() => { setDetail(null); setQuery('') }} onProblem={setProblem} />
             ) : (results || view === 'songs' || (view === 'artists' && artistName && artistTab === 'songs')) && songRows.error ? (
               <div role="alert" className="p-4 text-xs text-crit">{songRows.error}<button className="ml-3 text-ink" onClick={() => void reload()}>Retry</button></div>
-            ) : empty && !progress && !listening.playlists.length ? (
+            ) : empty && !progress && !listening.playlists.length && (view !== 'playlists' || results) ? (
               <Empty source={source} onSync={() => source === 'youtube' ? setView('settings') : void library.sync()} />
             ) : results || view === 'songs' || (view === 'artists' && artistName && artistTab === 'songs') ? (
               <div className="flex h-full flex-col"><SelectionBar songs={[...selected].sort((a,b) => a-b).map(i => songs[i]).filter((s): s is SongRow => !!s)} onClear={() => setSelected(new Set())} /><div className="relative min-h-0 flex-1"><VirtualList
@@ -450,7 +456,7 @@ export default function App() {
                     className="row mx-2 flex h-10 items-center gap-3 px-2 outline-none focus-visible:ring-1 focus-visible:ring-accent"
                     title="Open, or double-click to play"
                   >
-                    <Art id={p.id} />
+                    <Art id={listening.playlists.find(playlist => playlist.id === p.id)?.cover_id ?? p.id} />
                     <span className="truncate">{p.name}</span>
                   </div>
                 )}

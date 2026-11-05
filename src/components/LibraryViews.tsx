@@ -1,13 +1,15 @@
 import { useContext, useEffect, useRef, useState } from 'react'
-import { formatTime, library, type SongRow, type SortDirection } from '../lib/ipc'
+import { artworkUrl, formatTime, library, type SongRow, type SortDirection } from '../lib/ipc'
 import { filterSongs, selectionAfterClick } from '../lib/qol'
-import { qol, type SongEntry } from '../lib/qol-ipc'
+import { qol, type LocalPlaylist, type SongEntry } from '../lib/qol-ipc'
 import { songDownloadRequests } from '../lib/download-actions'
 import { DownloadButton } from './Downloads'
 import { ListeningContext, SelectionBar } from './ListeningTools'
 import { LibrarySort, SONG_SORTS } from './LibrarySort'
 import { LIBRARY_ROW_HEIGHT, SongLine } from './LibraryRows'
 import { VirtualList } from './VirtualList'
+import { playlistButton } from './PlaylistDialog'
+import { PlaylistEditor } from './PlaylistEditor'
 
 export type LibraryDetail = {
   kind: 'album' | 'playlist'
@@ -61,7 +63,7 @@ export function SavedSongs({ entries, title, query, nowPlayingId, onProblem }: {
 export function DetailView({
   detail,
   query,
-  localEntries,
+  localPlaylist,
   sort,
   onSort,
   direction,
@@ -74,7 +76,7 @@ export function DetailView({
 }: {
   detail: LibraryDetail
   query: string
-  localEntries?: SongEntry[]
+  localPlaylist?: LocalPlaylist
   sort: string
   onSort: (value: string) => void
   direction: SortDirection
@@ -86,9 +88,11 @@ export function DetailView({
   onProblem: (msg: string) => void
 }) {
   const [songs, setSongs] = useState<SongRow[] | null>(null)
+  const [editingPlaylistId, setEditingPlaylistId] = useState<string | null>(null)
   const listening = useContext(ListeningContext)
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const anchor = useRef(0)
+  const localEntries = localPlaylist?.songs
 
   useEffect(() => {
     setSongs(null)
@@ -139,8 +143,9 @@ export function DetailView({
         >
           Back
         </button>
+        {localPlaylist?.cover_id && <img alt="Playlist cover" src={artworkUrl(localPlaylist.cover_id, 128)} className="size-12 shrink-0 rounded-md border border-rule object-cover" />}
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[13px] text-ink">{detail.title}</div>
+          <h1 className="truncate text-[13px] text-ink">{localPlaylist?.name ?? detail.title}</h1>
           {detail.subtitle && (
             <div className="truncate text-[11px] text-muted">{detail.subtitle}</div>
           )}
@@ -148,6 +153,7 @@ export function DetailView({
         <span className="label shrink-0">
           {songs ? `${songs.length} · ${formatTime(total)}` : ''}
         </span>
+        {localPlaylist && <button className={playlistButton} aria-haspopup="dialog" onClick={() => setEditingPlaylistId(localPlaylist.id)}>Edit playlist</button>}
         <button
           onClick={() => {
             if (shown.length > 0) void play(0).catch(e => onProblem(String(e)))
@@ -159,6 +165,8 @@ export function DetailView({
         </button>
         {listening && <DownloadButton disabled={!songs?.length} label="Download all" onProblem={onProblem} requests={shown.flatMap((song, index) => songDownloadRequests([song], displayedEntries?.[index]?.source ?? listening.source, displayedEntries?.[index]?.context ?? listening.context))} />}
       </div>
+      {localPlaylist?.description && <p className="max-h-24 shrink-0 overflow-auto whitespace-pre-wrap break-words px-4 py-2 text-xs text-muted">{localPlaylist.description}</p>}
+      {localPlaylist && editingPlaylistId === localPlaylist.id && <PlaylistEditor playlist={localPlaylist} onClose={() => setEditingPlaylistId(null)} />}
       <LibrarySort label={`${detail.kind} tracks`} options={[{ value: 'original', label: 'Original order' }, ...SONG_SORTS]} value={sort} onChange={onSort} direction={direction} onDirection={onDirection} count={shown.length} loading={songs === null} />
       <SelectionBar songs={selectedSongs} entries={selectedEntries} onClear={() => setSelected(new Set())} />
 
@@ -171,9 +179,11 @@ export function DetailView({
           <VirtualList
             items={shown}
             rowHeight={LIBRARY_ROW_HEIGHT}
-            empty={<span className="text-muted">Nothing in here</span>}
-            render={(s, i) => (
-              <SongLine
+            empty={<span className="text-muted">{localEntries?.length === 0 ? 'Add songs from Discover or a track’s More menu.' : 'Nothing in here'}</span>}
+            render={(s, i) => {
+              const entry = displayedEntries?.[i]
+              const entryId = entry?.entry_id
+              return <SongLine
                 song={s}
                 index={i}
                 playable={canPlay(s)}
@@ -181,11 +191,12 @@ export function DetailView({
                 selected={selected.has(i)}
                 showCheckbox={detail.kind !== 'playlist'}
                 onSelect={(shift, toggle) => selectSong(i, shift, toggle)}
-                source={displayedEntries?.[i]?.source}
-                context={displayedEntries?.[i]?.context}
+                source={entry?.source}
+                context={entry?.context}
+                onRemoveFromPlaylist={entryId ? () => qol.playlistRemoveSong(detail.id, entryId) : undefined}
                 onPlay={() => void play(i).catch(e => onProblem(String(e)))}
               />
-            )}
+            }}
           />
         )}
       </div>

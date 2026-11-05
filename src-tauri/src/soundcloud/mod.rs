@@ -19,6 +19,9 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+pub(crate) const FULL_PLAYBACK_DENIED: &str =
+    "SoundCloud does not allow full anonymous playback for this track.";
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchKind {
@@ -565,7 +568,7 @@ impl Client {
         let value = self.track_value(target, false, cancel).await?;
         let track = parse_track(&value).ok_or("SoundCloud track is private or unavailable.")?;
         if !public_playable(&value) {
-            return Err("SoundCloud does not allow full anonymous playback for this track.".into());
+            return Err(FULL_PLAYBACK_DENIED.into());
         }
         let candidates = native_candidates(&value);
         if candidates.is_empty() {

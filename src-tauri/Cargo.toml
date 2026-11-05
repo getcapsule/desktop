@@ -33,6 +33,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 sha2 = "0.10"
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 getrandom = "0.3"
 futures-util = "0.3"
 rustypipe = { version = "=0.11.4", default-features = false, features = ["rustls-tls-webpki-roots"] }

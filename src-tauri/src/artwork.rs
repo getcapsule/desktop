@@ -466,6 +466,11 @@ async fn serve(
 ) -> Result<http::Response<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
     let (id, size) = parse_request(uri).ok_or("malformed artwork uri")?;
 
+    if id.starts_with(crate::qol::PLAYLIST_COVER_PREFIX) {
+        let bytes = crate::qol::playlist_cover(app, &id).ok_or("no playlist cover for id")?;
+        return Ok(ok_response(bytes, "image/png"));
+    }
+
     let mut art = {
         let state = app.state::<AppState>();
         let db = state.db.lock().expect("db mutex");
