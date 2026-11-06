@@ -46,47 +46,25 @@ it('starts the selected song at its index in the displayed queue', async () => {
   expect(discover.search).toHaveBeenCalledTimes(1)
 })
 
-it('opens a recommended album once and plays its cached tracklist in release order', async () => {
+it('recommends cached songs from favorite artists without contacting the catalog', async () => {
   const song = (id: string, name: string, artist_name: string): SongRow => ({ id, name, artist_name, album_name: 'Record', duration_ms: 1000, artwork_url: null, catalog_id: null })
   const favorite = song('favorite', 'Favorite song', 'Favorite artist')
   const related = { ...song('related', 'More from the artist', 'Favorite artist'), artwork_url: 'https://example.invalid/cover.jpg' }
   const other = song('other', 'Unrelated track', 'Other artist')
   const readSongs = vi.spyOn(library, 'songs').mockImplementation(async (_limit, _offset, options) => options?.artistName ? [favorite, related] : [other])
   const play = vi.spyOn(library, 'play').mockResolvedValue()
-  const albumSongs = vi.spyOn(library, 'albumSongs').mockResolvedValue([favorite, related])
-  const albums = [{ id: 'release', name: 'Record', artist_name: favorite.artist_name, artwork_url: related.artwork_url, track_count: 2 }]
   const snapshot = { ...EMPTY_QOL, history: [{ song: favorite, source: 'local' as const }], favorites: [{ song: favorite, source: 'local' as const }] }
-  render(<ListeningContext.Provider value={{ source: 'local', snapshot, problem: vi.fn(), artist: vi.fn(), album: vi.fn(), replace: vi.fn() }}><Discover albums={albums} /></ListeningContext.Provider>)
+  render(<ListeningContext.Provider value={{ source: 'local', snapshot, problem: vi.fn(), artist: vi.fn(), album: vi.fn(), replace: vi.fn() }}><Discover /></ListeningContext.Provider>)
 
-  const pick = await screen.findByRole('button', { name: 'Open album Record by Favorite artist' })
+  const pick = await screen.findByRole('button', { name: 'Play More from the artist' })
   expect(screen.getByRole('heading', { name: 'Picked for you' })).toBeDefined()
-  expect(screen.getAllByRole('button', { name: 'Open album Record by Favorite artist' })).toHaveLength(1)
+  expect(screen.getAllByRole('button', { name: /^Play / })[0]).toBe(pick)
   expect(readSongs).toHaveBeenCalledWith(expect.any(Number), 0, { artistName: 'Favorite artist' })
-  expect(pick.querySelector('img')?.getAttribute('src')).toBe('http://artwork.localhost/release?w=192&cache=only')
+  expect(screen.getByRole('region', { name: 'Picked for you' }).querySelector('img')?.getAttribute('src')).toBe('http://artwork.localhost/related?w=192&cache=only')
   expect(discover.search).not.toHaveBeenCalled()
   expect(discover.artistTracks).not.toHaveBeenCalled()
   expect(discover.albumTracks).not.toHaveBeenCalled()
   expect(play).not.toHaveBeenCalled()
   fireEvent.click(pick)
-  fireEvent.click(await screen.findByRole('button', { name: 'Play More from the artist' }))
-  expect(albumSongs).toHaveBeenCalledWith('release')
-  await waitFor(() => expect(play).toHaveBeenCalledWith([favorite, related], 1))
-  fireEvent.click(screen.getByRole('button', { name: 'Back to Homepage' }))
-  fireEvent.click(screen.getByRole('button', { name: 'Open mix Your rotation' }))
-  fireEvent.click(screen.getByRole('button', { name: 'Play all' }))
-  await waitFor(() => expect(play).toHaveBeenLastCalledWith([related, other, favorite], 0))
-  expect(discover.search).not.toHaveBeenCalled()
-})
-
-it('shows a fixed editorial tracklist and searches externally only on request', async () => {
-  vi.spyOn(library, 'songs').mockResolvedValue([])
-  vi.spyOn(library, 'search').mockResolvedValue([])
-  vi.mocked(discover.search).mockResolvedValue(result('Good Days'))
-  render(<ListeningContext.Provider value={{ source: 'local', snapshot: EMPTY_QOL, problem: vi.fn(), artist: vi.fn(), album: vi.fn(), replace: vi.fn() }}><Discover /></ListeningContext.Provider>)
-
-  fireEvent.click(await screen.findByRole('button', { name: 'Open playlist Late Night R&B' }))
-  const lookup = await screen.findByRole('button', { name: 'Search SoundCloud for Good Days by SZA' })
-  expect(discover.search).not.toHaveBeenCalled()
-  fireEvent.click(lookup)
-  await waitFor(() => expect(discover.search).toHaveBeenCalledWith('tracks', 'SZA Good Days', 0))
+  await waitFor(() => expect(play).toHaveBeenCalledWith([related], 0))
 })
