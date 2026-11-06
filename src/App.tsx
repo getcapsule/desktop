@@ -46,7 +46,7 @@ function authMessage(source: Source) {
 }
 
 export default function App() {
-  const [view, setView] = useState<LibraryView>('songs')
+  const [view, setView] = useState<LibraryView>('discover')
   const [listening, setListening] = useState<QolSnapshot>(EMPTY_QOL)
   const [navigationReady, setNavigationReady] = useState(false)
   const [focusTrackId, setFocusTrackId] = useState<string | null>(null)
@@ -76,7 +76,7 @@ export default function App() {
   const sourceRef = useRef<Source>('local')
   sourceRef.current = source
   const lastListRefresh = useRef(0)
-  const results = query.trim() !== '' && !detail && view !== 'favorites' && view !== 'history' && view !== 'discover' && view !== 'downloads'
+  const results = query.trim() !== '' && !detail && view !== 'favorites' && view !== 'history' && view !== 'downloads'
   const songRows = useLibraryRows(JSON.stringify([source, revision, songSort, direction, query.trim(), artistName]),
     (limit, offset) => library.songs(limit, offset, { sort: songSort, direction, query: query.trim(), ...(artistName && !results ? { artistName } : {}) }))
   const albumRows = useLibraryRows(JSON.stringify([source, revision, albumSort, direction, artistName]),
@@ -123,15 +123,11 @@ export default function App() {
       if (snapshot) {
         setListening(snapshot)
         const nav = validNavigation(snapshot.navigation)
-        if (nav.view) setView(nav.view)
         if (nav.songSort) setSongSort(nav.songSort)
         if (nav.albumSort) setAlbumSort(nav.albumSort)
         if (nav.direction) setDirection(nav.direction)
         if (nav.detailSort) setDetailSort(nav.detailSort)
         if (nav.detailDirection) setDetailDirection(nav.detailDirection)
-        if (nav.detail !== undefined) setDetail(nav.detail)
-        if (nav.artistName !== undefined) setArtistName(nav.artistName)
-        if (nav.artistTab) setArtistTab(nav.artistTab)
       }
       setNavigationReady(true)
     }).catch(() => setNavigationReady(true))
@@ -171,9 +167,9 @@ export default function App() {
 
   useEffect(() => {
     if (!navigationReady) return
-    const timer = window.setTimeout(() => { void qol.navigation({ view, songSort, albumSort, direction, detail, artistName, artistTab, detailSort, detailDirection }).catch(() => {}) }, 400)
+    const timer = window.setTimeout(() => { void qol.navigation({ songSort, albumSort, direction, detailSort, detailDirection }).catch(() => {}) }, 400)
     return () => window.clearTimeout(timer)
-  }, [navigationReady, view, songSort, albumSort, direction, detail, artistName, artistTab, detailSort, detailDirection])
+  }, [navigationReady, songSort, albumSort, direction, detailSort, detailDirection])
   useEffect(() => { setSelected(new Set()); selectionAnchor.current = 0 }, [view, songSort, direction, query, artistName, detail?.id, revision, source])
 
   useEffect(() => {
@@ -285,6 +281,7 @@ export default function App() {
       <div className="app-body flex min-h-0 flex-1">
         <nav aria-label="Main navigation" className="sidebar chrome flex shrink-0 flex-col gap-0.5">
           <div className="sidebar-links flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto">
+          <Tab icon="home" on={view === 'discover' && !results} onClick={() => { setQuery(''); setDetail(null); setView('discover') }}>Homepage</Tab>
           <div className="px-4 pt-2 pb-1.5 label">
             Library
           </div>
@@ -320,7 +317,6 @@ export default function App() {
           <div className="px-4 pt-4 pb-1.5 label">Listening</div>
           <Tab icon="favorites" on={view === 'favorites'} onClick={() => { setQuery(''); setDetail(null); setView('favorites') }}>Favorites <Count n={listening.favorites.length} /></Tab>
           <Tab icon="history" on={view === 'history'} onClick={() => { setQuery(''); setDetail(null); setView('history') }}>Recently played</Tab>
-          <Tab icon="discover" on={view === 'discover'} onClick={() => { setQuery(''); setDetail(null); setView('discover') }}>Discover</Tab>
           <Tab icon="downloads" on={view === 'downloads'} onClick={() => { setQuery(''); setDetail(null); setView('downloads') }}>Downloads</Tab>
           <Tab icon="queue" on={view === 'queue' && !results} onClick={() => { setQuery(''); setDetail(null); setView('queue') }}>Queue <Count n={Math.max(0, (state?.queue.length ?? 0) - (state?.index ?? 0))} /></Tab>
 
@@ -371,7 +367,7 @@ export default function App() {
                 {view === 'playlists' && !results && <button className={playlistButton} aria-haspopup="dialog" onClick={() => setCreatingPlaylist(true)}>New playlist</button>}
               </div>
             )}
-            {creatingPlaylist && <PlaylistDialog onClose={() => setCreatingPlaylist(false)} onSave={(_, name) => qol.playlistAdd([], source, null, name)} />}
+            {creatingPlaylist && <PlaylistDialog offerImport onClose={() => setCreatingPlaylist(false)} onSave={(_, name) => qol.playlistAdd([], source, null, name)} />}
             {artistName && !detail && view === 'artists' && !results && <div className="border-b border-rule px-4 py-3">
               <button className="text-xs text-muted" onClick={() => setArtistName(null)}>Back</button>
               <h1 className="mt-2 text-sm font-semibold">{artistName}</h1>
@@ -384,8 +380,8 @@ export default function App() {
             <div className="relative min-h-0 flex-1">
             {view === 'downloads' ? (
               <Downloads />
-            ) : view === 'discover' ? (
-              <Discover onPlayed={() => setRevision(value => value + 1)} />
+            ) : view === 'discover' && !results ? (
+              <Discover canPlay={canPlay} onPlayed={() => setRevision(value => value + 1)} />
             ) : view === 'settings' && !results ? (
               <SettingsView focusTrackId={focusTrackId ?? undefined} />
             ) : view === 'queue' && !results ? (

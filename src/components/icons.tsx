@@ -39,7 +39,7 @@ const navigationPaths = {
   playlists: 'M4 5h16 M4 10h16 M4 15h8 M17 13v8 M13 17h8',
   favorites: 'M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z',
   history: 'M3 11a9 9 0 1 1 2.6 7.4 M3 4v7h7 M12 7v5l3 2',
-  discover: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0 M16 8l-2.5 5.5L8 16l2.5-5.5L16 8Z',
+  home: 'm3 10 9-7 9 7v10H3z M9 20v-7h6v7',
   downloads: 'M12 3v12 M7 10l5 5 5-5 M4 16v5h16v-5',
   queue: 'M3 5h17 M3 10h17 M3 15h8 M15 14l6 4-6 4v-8Z M3 20h6',
   lyrics: 'M4 4h16v13H9l-5 4V4Z M8 8h8 M8 12h5',

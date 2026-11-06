@@ -110,7 +110,7 @@ fn content_type(url: &str) -> &'static str {
     }
 }
 
-pub fn parse_request(uri: &str) -> Option<(String, u32)> {
+pub fn parse_request(uri: &str) -> Option<(String, u32, bool)> {
     let parsed = url::Url::parse(uri).ok()?;
     let id = parsed
         .path_segments()
@@ -131,7 +131,10 @@ pub fn parse_request(uri: &str) -> Option<(String, u32)> {
     } else {
         raw.clamp(32, crate::db::MAX_ARTWORK)
     };
-    Some((id, size))
+    let cache_only = parsed
+        .query_pairs()
+        .any(|(key, value)| key == "cache" && value == "only");
+    Some((id, size, cache_only))
 }
 
 pub fn handle(
@@ -460,11 +463,40 @@ async fn ensure_import_cached(
     Ok((bytes, mime))
 }
 
+async fn offline_artwork(
+    dir: &Path,
+    art: &crate::db::Artwork,
+    size: u32,
+    imported: bool,
+) -> Result<http::Response<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
+    if imported {
+        imported_artwork_url(&resolve_template(&art.template, size))?;
+    }
+    // Homepage may reuse covers cached at library and transport sizes.
+    // Cache misses must never reach the remote artwork fetchers.
+    for want in [size, art.clamp(96), art.clamp(56)] {
+        let path = cache_path(dir, &art.template, want);
+        if imported
+            && !tokio::fs::metadata(&path)
+                .await
+                .is_ok_and(|metadata| metadata.len() <= IMPORTED_ARTWORK_LIMIT as u64)
+        {
+            continue;
+        }
+        if let Ok(bytes) = tokio::fs::read(&path).await {
+            if let Some(mime) = raster_type(&bytes) {
+                return Ok(ok_response(bytes, mime));
+            }
+        }
+    }
+    Err("no offline artwork for id".into())
+}
+
 async fn serve(
     app: &tauri::AppHandle,
     uri: &str,
 ) -> Result<http::Response<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
-    let (id, size) = parse_request(uri).ok_or("malformed artwork uri")?;
+    let (id, size, cache_only) = parse_request(uri).ok_or("malformed artwork uri")?;
 
     if id.starts_with(crate::qol::PLAYLIST_COVER_PREFIX) {
         let bytes = crate::qol::playlist_cover(app, &id).ok_or("no playlist cover for id")?;
@@ -505,6 +537,9 @@ async fn serve(
             imported.clamp(size)
         };
         let dir = cache_dir(app.path().app_data_dir().ok()).ok_or("no cache dir")?;
+        if cache_only {
+            return offline_artwork(&dir, &imported, want, true).await;
+        }
         let (bytes, mime) = ensure_import_cached(&dir, &imported.template, want).await?;
         return Ok(ok_response(bytes, mime));
     }
@@ -516,6 +551,9 @@ async fn serve(
         art.clamp(size)
     };
     let dir = cache_dir(app.path().app_data_dir().ok()).ok_or("no cache dir")?;
+    if cache_only {
+        return offline_artwork(&dir, &art, want, false).await;
+    }
     let bytes = ensure_cached(&dir, &art.template, want, signer(app).as_deref()).await?;
     Ok(ok_response(
         bytes,
@@ -644,6 +682,26 @@ mod tests {
             .await
             .unwrap();
         assert!(ensure_import_cached(&dir, hostile, 56).await.is_err());
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn offline_artwork_reuses_cached_thumbnails_and_stops_at_a_cache_miss() {
+        let dir = std::env::temp_dir().join(format!("capsule-offline-art-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let art = crate::db::Artwork {
+            template: "https://i.scdn.co/image/offline-cover".into(),
+            max_side: None,
+        };
+        assert!(offline_artwork(&dir, &art, 192, true).await.is_err());
+
+        let png = b"\x89PNG\r\n\x1a\ncached-image";
+        tokio::fs::write(cache_path(&dir, &art.template, 56), png)
+            .await
+            .unwrap();
+        let response = offline_artwork(&dir, &art, 192, true).await.unwrap();
+        assert_eq!(response.headers()["Content-Type"], "image/png");
+        assert_eq!(response.body().as_slice(), png);
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
@@ -816,9 +874,15 @@ mod tests {
 
     #[test]
     fn parses_id_and_size() {
-        let (id, size) = parse_request("artwork://localhost/l.abc123?w=600").unwrap();
+        let (id, size, cache_only) = parse_request("artwork://localhost/l.abc123?w=600").unwrap();
         assert_eq!(id, "l.abc123");
         assert_eq!(size, 600);
+        assert!(!cache_only);
+        assert!(
+            parse_request("artwork://localhost/l.abc123?w=600&cache=only")
+                .unwrap()
+                .2
+        );
     }
 
     #[test]
@@ -872,14 +936,14 @@ mod tests {
 
     #[test]
     fn handles_the_http_rewrite_tauri_uses_on_windows() {
-        let (id, size) = parse_request("http://artwork.localhost/i.999?w=64").unwrap();
+        let (id, size, _) = parse_request("http://artwork.localhost/i.999?w=64").unwrap();
         assert_eq!(id, "i.999");
         assert_eq!(size, 64);
     }
 
     #[test]
     fn percent_encoded_ids_round_trip() {
-        let (id, _) = parse_request("artwork://localhost/l.a%20b?w=300").unwrap();
+        let (id, _, _) = parse_request("artwork://localhost/l.a%20b?w=300").unwrap();
         assert_eq!(id, "l.a b");
     }
 

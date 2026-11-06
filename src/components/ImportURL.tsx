@@ -16,7 +16,7 @@ function Action({ children, onClick, disabled = false }: { children: React.React
 
 type MetadataSettingsProps = { settingsDraft?: Settings; editSettings?: (patch: Partial<Settings>) => Promise<void> }
 
-export function ImportURL({ onComplete, settingsDraft, editSettings, focusTrackId }: { onComplete: (message: string) => void; focusTrackId?: string } & MetadataSettingsProps) {
+export function ImportURL({ onComplete, settingsDraft, editSettings, focusTrackId, autoFocus }: { onComplete: (message: string) => void; focusTrackId?: string; autoFocus?: boolean } & MetadataSettingsProps) {
   const [url, setUrl] = useState('')
   const [detected, setDetected] = useState<{ url: string; target: ImportUrl } | null>(null)
   const [detectError, setDetectError] = useState<string | null>(null)
@@ -142,7 +142,7 @@ export function ImportURL({ onComplete, settingsDraft, editSettings, focusTrackI
   return <div className="space-y-3">
     {focusTrackId && <div className="rounded border border-rule p-3 text-[11px] text-muted"><p className="text-ink">Choose another recording</p><TrackReview key={focusTrackId} trackId={focusTrackId} onChanged={() => { refresh(); onComplete('Playback recording updated.') }} /></div>}
     <div className="flex gap-2">
-      <input aria-label="Music URL" type="url" value={url} disabled={busy} className={fieldClass}
+      <input aria-label="Music URL" type="url" value={url} disabled={busy} autoFocus={autoFocus} className={fieldClass}
         placeholder="Paste a playlist, album, or track URL…" onChange={event => {
           epoch.current++
           setUrl(event.target.value); setDetected(null); setDetectError(null); setError(null)

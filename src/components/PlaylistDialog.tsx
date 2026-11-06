@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { LocalPlaylist } from '../lib/qol-ipc'
+import { ImportURL } from './ImportURL'
 
 export const playlistField = 'w-full rounded-md border border-rule bg-ground px-3 py-2 text-sm text-ink focus-visible:outline-2 focus-visible:outline-accent'
 export const playlistButton = 'shrink-0 rounded-md border border-rule px-3 py-1.5 text-xs text-ink hover:border-accent focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40'
@@ -43,16 +44,19 @@ export function PlaylistModal({ title, description, busy, onClose, children }: {
   )
 }
 
-export function PlaylistDialog({ description, playlists = [], onSave, onClose }: {
+export function PlaylistDialog({ description, playlists = [], offerImport = false, onSave, onClose }: {
   description?: string
   playlists?: LocalPlaylist[]
+  offerImport?: boolean
   onSave: (playlistId: string | null, name: string | null) => Promise<string>
   onClose: () => void
 }) {
+  const [step, setStep] = useState<'choose' | 'create' | 'import'>(offerImport ? 'choose' : 'create')
   const [playlistId, setPlaylistId] = useState('')
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState('')
+  const [importNote, setImportNote] = useState('')
   const adding = description !== undefined
 
   async function save(id: string | null, newName: string | null, close: () => void) {
@@ -67,6 +71,44 @@ export function PlaylistDialog({ description, playlists = [], onSave, onClose }:
       setBusy(false)
     }
   }
+
+  if (step === 'choose') return (
+    <PlaylistModal title="New playlist" description="How would you like to start?" busy={false} onClose={onClose}>
+      {close => (
+        <>
+          <div className="grid gap-2">
+            <button type="button" className={`${playlistButton} px-3 py-2 text-left`} autoFocus onClick={() => setStep('create')}>
+              <span className="block font-medium">Brand new</span>
+              <span className="mt-0.5 block text-muted">Start with an empty playlist.</span>
+            </button>
+            <button type="button" className={`${playlistButton} px-3 py-2 text-left`} onClick={() => { setImportNote(''); setStep('import') }}>
+              <span className="block font-medium">Import from a link</span>
+              <span className="mt-0.5 block text-muted">Bring music over from another service.</span>
+            </button>
+          </div>
+          <div className="flex justify-end border-t border-rule pt-3">
+            <button type="button" className={playlistButton} onClick={close}>Cancel</button>
+          </div>
+        </>
+      )}
+    </PlaylistModal>
+  )
+
+  if (step === 'import') return (
+    <PlaylistModal title="Import playlist" busy={false} onClose={onClose}>
+      {close => (
+        <>
+          <p className="text-xs text-muted">Paste a link from Spotify, Apple Music, YouTube Music, or SoundCloud.</p>
+          <ImportURL onComplete={setImportNote} autoFocus />
+          {importNote && <p role="status" className="text-xs text-muted">{importNote}</p>}
+          <div className="flex justify-between border-t border-rule pt-3">
+            <button type="button" className={playlistButton} onClick={() => setStep('choose')}>Back</button>
+            <button type="button" className={playlistButton} onClick={close}>Close import</button>
+          </div>
+        </>
+      )}
+    </PlaylistModal>
+  )
 
   return (
     <PlaylistModal title={adding ? 'Add to playlist' : 'New playlist'} description={description} busy={busy} onClose={onClose}>
@@ -87,12 +129,13 @@ export function PlaylistDialog({ description, playlists = [], onSave, onClose }:
           <form className="flex items-end gap-2" onSubmit={event => { event.preventDefault(); if (name.trim()) void save(null, name.trim(), close) }}>
             <label className="min-w-0 flex-1 space-y-1 text-xs text-muted">
               <span>Playlist name</span>
-              <input value={name} maxLength={200} disabled={busy} onChange={event => setName(event.target.value)} placeholder="Name your playlist" className={playlistField} />
+              <input value={name} maxLength={200} disabled={busy} autoFocus={offerImport} onChange={event => setName(event.target.value)} placeholder="Name your playlist" className={playlistField} />
             </label>
             <button className={playlistButton} disabled={busy || !name.trim()}>{adding ? 'Create and add' : 'Create playlist'}</button>
           </form>
           {problem && <p role="alert" className="text-xs text-crit">{problem}</p>}
-          <div className="flex justify-end border-t border-rule pt-3">
+          <div className="flex justify-end gap-2 border-t border-rule pt-3">
+            {offerImport && <button type="button" className={`${playlistButton} mr-auto`} disabled={busy} onClick={() => setStep('choose')}>Back</button>}
             <button type="button" className={playlistButton} disabled={busy} onClick={close}>Cancel</button>
           </div>
         </>

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import App from '../App'
 import { Onboarding } from './Onboarding'
@@ -107,6 +107,8 @@ it.each([null, 'catalogVideoId'])('plays YouTube songs using catalog id %s or fa
     return original(command, args)
   })
   render(<App />)
+  const navigation = await screen.findByRole('navigation', { name: 'Main navigation' })
+  fireEvent.click(within(navigation).getByRole('button', { name: /^Songs/ }))
   const row = await screen.findByRole('button', { name: /^Public library song/ })
   await waitFor(() => expect(row.getAttribute('aria-disabled')).toBe('false'))
   fireEvent.doubleClick(row)

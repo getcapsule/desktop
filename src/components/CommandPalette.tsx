@@ -190,6 +190,7 @@ export function CommandPalette({
           </Group>
 
           <Group label="Go to">
+            <Item value="go homepage discover" onSelect={() => run(() => onNavigate('discover'))}>Homepage</Item>
             <Item value="go queue" onSelect={() => run(() => onNavigate('queue'))}>Queue <span className="ml-auto text-muted">Ctrl+Q</span></Item>
             <Item value="go favorites" onSelect={() => run(() => onNavigate('favorites'))}>Favorites</Item>
             <Item value="go history recently played" onSelect={() => run(() => onNavigate('history'))}>Recently played</Item>

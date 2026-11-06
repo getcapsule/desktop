@@ -421,32 +421,21 @@ export function LastfmFields({
   edit,
 }: {
   draft: Settings
-  edit: (patch: Partial<Settings>) => void
+  edit: (patch: Partial<Settings>) => Promise<void>
 }) {
-  return (
-    <div className="space-y-3">
-      <Field
-        label="API key"
-        value={draft.lastfm.api_key}
-        onChange={(v) => edit({ lastfm: { ...draft.lastfm, api_key: v } })}
-      />
-      <Field
-        label="Shared secret"
-        value={draft.lastfm.shared_secret}
-        onChange={(v) => edit({ lastfm: { ...draft.lastfm, shared_secret: v } })}
-      />
-      <LastfmAccount />
-    </div>
-  )
-}
-
-function LastfmAccount() {
   const [status, setStatus] = useState<LastfmStatus | null>(null)
   const [note, setNote] = useState<string | null>(null)
   const [waiting, setWaiting] = useState(false)
+  const [credentialSave, setCredentialSave] = useState<'ready' | 'saving' | 'failed'>('ready')
+  const request = useRef(0)
 
   useEffect(() => {
-    void lastfmIpc.status().then(setStatus)
+    const initial = ++request.current
+    void lastfmIpc.status().then(result => {
+      if (request.current === initial) setStatus(result)
+    }).catch(error => {
+      if (request.current === initial) setNote(String(error))
+    })
     const subs = [
       on('lastfm://linked', (s) => {
         setStatus(s)
@@ -459,9 +448,30 @@ function LastfmAccount() {
       }),
     ]
     return () => {
+      ++request.current
       for (const s of subs) void s.then((un) => un())
     }
   }, [])
+
+  const saveCredentials = async (credentials: Settings['lastfm']) => {
+    const current = ++request.current
+    setCredentialSave('saving')
+    setNote(null)
+    try {
+      await edit({ lastfm: credentials })
+      if (request.current !== current) return
+      const result = await lastfmIpc.status()
+      if (request.current === current) {
+        setStatus(result)
+        setCredentialSave('ready')
+      }
+    } catch (error) {
+      if (request.current === current) {
+        setCredentialSave('failed')
+        setNote(String(error))
+      }
+    }
+  }
 
   const link = async () => {
     setNote(null)
@@ -483,32 +493,44 @@ function LastfmAccount() {
     }
   }
 
-  if (!status) return null
+  const saving = credentialSave === 'saving'
+  const canConnect = credentialSave === 'ready' && status?.configured
+  let hint = 'Add a key and secret above, then connect your account.'
+  if (saving) hint = 'Saving Last.fm credentials…'
+  else if (credentialSave === 'failed') hint = 'Edit the credentials to try again.'
+  else if (status?.linked) hint = 'Plays are sent straight to Last.fm, so local files count too.'
+  else if (waiting) hint = 'Approve Capsule in the window that just opened.'
+  else if (canConnect) hint = 'Connect your account to send plays to Last.fm.'
 
   return (
-    <div className="space-y-2 pt-1">
-      <div className="flex items-center gap-3">
-        <button
-          onClick={() => void (status.linked ? unlink() : link())}
-          disabled={!status.configured || waiting}
-          className="rounded border border-rule px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-rule disabled:hover:text-muted"
-        >
-          {status.linked ? 'Sign out' : waiting ? 'Waiting…' : 'Connect account'}
-        </button>
-        {status.linked && status.username && (
-          <span className="label text-muted">scrobbling as {status.username}</span>
-        )}
+    <div className="space-y-3">
+      <Field
+        label="API key"
+        value={draft.lastfm.api_key}
+        onChange={value => void saveCredentials({ ...draft.lastfm, api_key: value })}
+      />
+      <Field
+        label="Shared secret"
+        type="password"
+        value={draft.lastfm.shared_secret}
+        onChange={value => void saveCredentials({ ...draft.lastfm, shared_secret: value })}
+      />
+      <div className="space-y-2 pt-1">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => void (status?.linked ? unlink() : link())}
+            disabled={saving || waiting || !(status?.linked || canConnect)}
+            className="rounded border border-rule px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-rule disabled:hover:text-muted"
+          >
+            {status?.linked ? 'Sign out' : waiting ? 'Waiting…' : 'Connect account'}
+          </button>
+          {status?.linked && status.username && (
+            <span className="label text-muted">scrobbling as {status.username}</span>
+          )}
+        </div>
+        <p className="text-[11px] leading-5 text-muted">{hint}</p>
+        {note && <p role="alert" className="text-[11px] leading-5 text-crit">{note}</p>}
       </div>
-      <p className="text-[11px] leading-5 text-muted">
-        {!status.configured
-          ? 'Add a key and secret above, then connect your account.'
-          : status.linked
-            ? 'Plays are sent straight to Last.fm, so local files count too.'
-            : waiting
-              ? 'Approve capsule in the window that just opened.'
-              : 'Without this, only a server that scrobbles for you can report plays.'}
-      </p>
-      {note && <p className="text-[11px] leading-5 text-crit">{note}</p>}
     </div>
   )
 }
