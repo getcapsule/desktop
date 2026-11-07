@@ -332,7 +332,7 @@ it('opens Homepage at startup even with a saved playlist detail, and restores so
   })
   render(<App />)
   expect(await screen.findByRole('heading', { name: 'Homepage' })).toBeDefined()
-  expect(await screen.findByRole('button', { name: 'Play First' })).toBeDefined()
+  expect(await screen.findByRole('button', { name: 'Open album Record by A & B' })).toBeDefined()
   expect(screen.queryByText('Old playlist')).toBeNull()
   expect(screen.getByRole('button', { name: 'Homepage' }).getAttribute('aria-current')).toBe('page')
   expect(screen.getByText('your folders')).toBeDefined()

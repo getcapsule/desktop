@@ -4,7 +4,7 @@ import { downloads, type DownloadJob, type DownloadRequest } from '../lib/downlo
 import { chooseDownloadDirectory, downloadDirectory, queueDownloads } from '../lib/download-actions'
 import { VirtualList } from './VirtualList'
 
-const button = 'rounded border border-rule px-2.5 py-1.5 text-xs text-muted hover:border-accent hover:text-ink focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40'
+const button = 'rounded border border-rule px-2.5 py-1.5 text-xs text-muted hover:border-accent hover:text-ink disabled:opacity-40'
 export function DownloadButton({ requests, label = 'Download', disabled = false, onProblem }: { requests: DownloadRequest[]; label?: string; disabled?: boolean; onProblem?: (message: string) => void }) {
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')

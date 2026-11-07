@@ -166,7 +166,7 @@ export function SpotifySetup({
             void edit({ spotify: { client_id: event.target.value } })
           }}
           onKeyDown={(event) => { if (event.key === 'Enter') void connect() }}
-          className="mt-1 w-full rounded border border-rule bg-ground px-2.5 py-1.5 text-xs text-ink outline-none placeholder:text-muted focus:border-muted disabled:opacity-40"
+          className="mt-1 w-full rounded border border-rule bg-ground px-2.5 py-1.5 text-xs text-ink placeholder:text-muted disabled:opacity-40"
         />
       </label>
       <div className="flex flex-wrap items-center gap-3 pt-1">

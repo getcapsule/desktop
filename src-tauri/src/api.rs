@@ -1,10 +1,3 @@
-//! Apple Music API client.
-//!
-//! Runs in Rust rather than the webview so library fetching never competes with
-//! playback, and so responses can go straight into SQLite. Authentication is the
-//! pair of tokens harvested from Apple's own page: the developer token as a
-//! bearer, the music-user token in its own header.
-
 use serde::Deserialize;
 
 use crate::auth::Tokens;

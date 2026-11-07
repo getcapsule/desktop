@@ -48,7 +48,7 @@ export function SongLine({
       aria-disabled={!playable}
       aria-pressed={selected}
       data-playing={playing}
-      className={`row mx-2 grid h-10 grid-cols-[28px_36px_1fr_1fr_52px_auto] items-center gap-3 px-2 outline-none focus-visible:ring-1 focus-visible:ring-accent ${selected ? 'bg-ink/10' : ''} ${
+      className={`row mx-2 grid h-10 grid-cols-[28px_36px_1fr_1fr_52px_auto] items-center gap-3 px-2 ${selected ? 'bg-ink/10' : ''} ${
         playable ? '' : 'opacity-40'
       }`}
       title={playable ? 'Play' : 'Not playable from this source'}
@@ -97,7 +97,7 @@ export function AlbumLine({
       tabIndex={0}
       title="Open, or double-click to play"
       onDoubleClick={onPlay}
-      className="row mx-2 grid h-10 grid-cols-[36px_1fr_1fr_60px] items-center gap-3 px-2 outline-none focus-visible:ring-1 focus-visible:ring-accent"
+      className="row mx-2 grid h-10 grid-cols-[36px_1fr_1fr_60px] items-center gap-3 px-2"
     >
       <Art id={album.id} />
       <span className="truncate">{album.name}</span>

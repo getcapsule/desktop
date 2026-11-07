@@ -12,7 +12,7 @@ export const ListeningContext = createContext<{
   source: Source; context?: string; snapshot: QolSnapshot; problem: (message: string) => void
   artist: (name: string) => void; album: (song: SongRow) => void; replace: (id: string) => void
 } | null>(null)
-const button = 'rounded border border-rule px-2 py-1 text-[11px] text-muted hover:border-accent hover:text-ink focus-visible:outline focus-visible:outline-accent disabled:opacity-40'
+const button = 'rounded border border-rule px-2 py-1 text-[11px] text-muted hover:border-accent hover:text-ink disabled:opacity-40'
 
 export function TrackTools({ songs, source, context, onRemoveFromPlaylist }: {
   songs: SongRow[]
@@ -51,7 +51,7 @@ export function TrackTools({ songs, source, context, onRemoveFromPlaylist }: {
     setAnchor(null); trigger.current?.focus()
     void Promise.resolve().then(action).catch(e => listening.problem(String(e)))
   }
-  const action = (label: string, fn: () => Promise<unknown> | void) => <button role="menuitem" className="block w-full rounded px-3 py-2 text-left text-xs hover:bg-ink/10 focus:bg-ink/10 focus:outline-none" onClick={() => run(fn)}>{label}</button>
+  const action = (label: string, fn: () => Promise<unknown> | void) => <button role="menuitem" className="block w-full rounded px-3 py-2 text-left text-xs hover:bg-ink/10 focus:bg-ink/10" onClick={() => run(fn)}>{label}</button>
   return <span className="inline-flex shrink-0" onClick={e => e.stopPropagation()} onDoubleClick={e => e.stopPropagation()}>
     <button ref={trigger} data-track-menu aria-label={`More actions for ${songs.length > 1 ? `${songs.length} selected tracks` : song.name}`} aria-haspopup="menu" aria-expanded={!!anchor} className={button} onClick={() => {
       const r = trigger.current!.getBoundingClientRect()

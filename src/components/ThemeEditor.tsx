@@ -5,7 +5,7 @@ const colors = [
   ['ground', 'Background'], ['panel', 'Panel'], ['ink', 'Text'], ['accent', 'Accent'],
   ['rule', 'Borders'], ['muted', 'Secondary text'], ['ok', 'Success'], ['warn', 'Warning'], ['crit', 'Error'],
 ] as const
-const button = 'rounded border border-rule px-2.5 py-1.5 text-xs text-muted hover:border-accent hover:text-ink focus-visible:outline-accent disabled:opacity-40'
+const button = 'rounded border border-rule px-2.5 py-1.5 text-xs text-muted hover:border-accent hover:text-ink disabled:opacity-40'
 type Draft = { name: string; colors: Record<string, string> }
 function encode(draft: Draft) {
   return [`name = ${JSON.stringify(draft.name)}`, ...colors.flatMap(([key]) => draft.colors[key]?.trim() ? [`${key} = ${JSON.stringify(draft.colors[key]!.trim())}`] : [])].join('\n')

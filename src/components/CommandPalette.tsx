@@ -94,7 +94,7 @@ export function CommandPalette({
           onValueChange={setQuery}
           autoFocus
           placeholder="Search songs, albums, playlists, or run a command…"
-          className="bg-transparent px-4 py-3 text-sm text-ink outline-none placeholder:text-muted"
+          className="bg-transparent px-4 py-3 text-sm text-ink placeholder:text-muted"
         />
         <Command.List className="flex-1 overflow-y-auto p-1.5">
           <Command.Empty className="px-3 py-6 text-center text-xs text-muted">

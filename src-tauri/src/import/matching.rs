@@ -192,9 +192,9 @@ pub fn rank(track: &Metadata, candidates: &mut [PlaybackCandidate]) {
         (candidate.confidence, candidate.compatible) = score(track, &candidate.metadata);
     }
     candidates.sort_by(|a, b| {
-        b.compatible
-            .cmp(&a.compatible)
-            .then_with(|| b.confidence.total_cmp(&a.confidence))
+        b.confidence
+            .total_cmp(&a.confidence)
+            .then_with(|| b.compatible.cmp(&a.compatible))
             .then_with(|| a.external_id.cmp(&b.external_id))
     });
 }
@@ -238,26 +238,25 @@ pub fn automatic_candidate<'a>(
     selected
 }
 
-/// Playback recovery is more tolerant than library deduplication. Provider
-/// padding and extra collaborator credits may differ; different songs, primary
-/// artists, known ISRCs and editions must still never be silently substituted.
+/// Recovery tries the highest-scoring playable candidates for the current
+/// session. These scores do not establish a verified library mapping.
 pub fn autoplay_candidates(
     track: &Metadata,
     candidates: &[PlaybackCandidate],
 ) -> Vec<PlaybackCandidate> {
-    let identity = recording_identity(track);
-    let mut eligible: Vec<_> = candidates.iter().filter(|candidate| {
-        let other = &candidate.metadata;
-        let primary = matches!((track.artists.first(), other.artists.first()), (Some(a), Some(b)) if !normalize(a).is_empty() && normalize(a) == normalize(b));
-        let duration = matches!((track.duration_ms, other.duration_ms), (Some(a), Some(b)) if a > 0 && b > 0 && a.abs_diff(b) <= (a / 10).clamp(2_000, 20_000));
-        candidate.provider == super::model::Platform::Youtube
-            && super::urls::video_id(&candidate.external_id)
-            && !identity.0.is_empty() && identity.0 == recording_identity(other).0
-            && primary && duration && versions_compatible(track, other)
-            && !matches!((&track.isrc, &other.isrc), (Some(a), Some(b)) if normalize_isrc(a) != normalize_isrc(b))
-    }).cloned().collect();
+    let mut eligible: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.provider == super::model::Platform::Youtube
+                && crate::youtube_native::resolver::valid_id(&candidate.external_id)
+        })
+        .cloned()
+        .collect();
     rank(track, &mut eligible);
-    eligible.dedup_by(|a, b| a.external_id == b.external_id);
+    let mut seen = std::collections::HashSet::new();
+    eligible.retain(|candidate| {
+        candidate.confidence > 0.0 && seen.insert(candidate.external_id.clone())
+    });
     eligible.truncate(5);
     eligible
 }
@@ -267,10 +266,11 @@ mod tests {
     use super::*;
     use crate::import::model::{fixture, Platform};
     #[test]
-    fn autoplay_tries_plausible_catalog_variants_before_manual_review() {
+    fn autoplay_ranks_fallbacks_by_score_even_when_the_best_version_differs() {
         let mut target = fixture("source", "Trust").metadata;
         target.artists = vec!["Brent Faiyaz".into()];
         target.duration_ms = Some(158_420);
+        target.album = Some("Original Album".into());
         let mut candidate = PlaybackCandidate {
             provider: Platform::Youtube,
             external_id: "vu1vQyjE1aA".into(),
@@ -278,16 +278,24 @@ mod tests {
             confidence: 0.0,
             compatible: false,
         };
-        candidate.metadata.duration_ms = Some(165_000);
-        assert_eq!(autoplay_candidates(&target, &[candidate.clone()]).len(), 1);
-        candidate.metadata.title = "Trust (Live)".into();
-        assert!(autoplay_candidates(&target, &[candidate.clone()]).is_empty());
-        candidate.metadata.title = target.title.clone();
-        candidate.metadata.artists = vec!["Other Artist".into()];
-        assert!(autoplay_candidates(&target, &[candidate.clone()]).is_empty());
-        candidate.metadata.artists = target.artists.clone();
-        candidate.metadata.duration_ms = Some(205_000);
-        assert!(autoplay_candidates(&target, &[candidate]).is_empty());
+        candidate.metadata.duration_ms = Some(171_000);
+        candidate.metadata.album = Some("Other Release".into());
+        let mut live = candidate.clone();
+        live.external_id = "abcdefghijk".into();
+        live.metadata.title = "Trust (Live)".into();
+        live.metadata.duration_ms = target.duration_ms;
+        live.metadata.album = target.album.clone();
+        let mut invalid = live.clone();
+        invalid.external_id = "invalid".into();
+        let candidates = autoplay_candidates(
+            &target,
+            &[candidate.clone(), invalid, live.clone(), live.clone()],
+        );
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].external_id, live.external_id);
+        assert!(!candidates[0].compatible);
+        assert!(candidates[0].confidence > candidates[1].confidence);
+        assert_eq!(candidates[1].external_id, candidate.external_id);
     }
     #[test]
     fn featured_credits_can_move_between_title_and_artist_fields() {

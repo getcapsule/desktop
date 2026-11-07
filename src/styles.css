@@ -40,6 +40,7 @@
   --edge-tint: 255, 255, 255;
   --radius-surface: 20px;
   --radius-row: 8px;
+  --focus-fill: color-mix(in srgb, var(--color-accent) 24%, var(--color-panel));
   /* Derived from the public theme tokens: imported themes recolor everything. */
   --glass-line: color-mix(in srgb, var(--color-ink) 13%, transparent);
   --glass-highlight: rgba(var(--edge-tint), 0.10);
@@ -86,7 +87,6 @@ button, input[type='text'], input[type='search'], input[type='password'], select
 button { cursor: pointer; }
 button:disabled { cursor: default; }
 button, a, input, select, textarea { -webkit-tap-highlight-color: transparent; }
-:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
 input[type='checkbox'] { accent-color: var(--color-accent); }
 input::placeholder, textarea::placeholder { color: var(--color-muted); }
 select { color: var(--color-ink); background-color: var(--color-panel); }
@@ -127,7 +127,7 @@ option { color: var(--color-ink); background: var(--color-panel); }
   box-shadow: inset 0 1px 1px color-mix(in srgb, var(--glass-specular) 40%, transparent), inset 0 -1px 1px var(--glass-line), 0 4px 12px color-mix(in srgb, var(--color-ground) 12%, transparent);
 }
 .library-search:focus-within { border-color: var(--color-accent); }
-.library-search input { height: 100%; border-radius: 0; outline: none; }
+.library-search input { height: 100%; border-radius: 0; }
 .library-search input::placeholder, .library-search .text-muted { color: var(--glass-muted); }
 .search-shortcut { padding: 2px 5px; font-size: 10px; white-space: nowrap; }
 .source-badge { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--color-muted); white-space: nowrap; }
@@ -233,11 +233,23 @@ input[type='range'] {
   height: 4px;
   cursor: pointer;
   border-radius: 5px;
-  background: linear-gradient(to right, var(--color-ink) calc(var(--fill, 0) * 1%), var(--color-rule) 0);
+  background: linear-gradient(to right, var(--range-ink, var(--color-ink)) calc(var(--fill, 0) * 1%), var(--color-rule) 0);
 }
-input[type='range']::-webkit-slider-thumb { appearance: none; width: 10px; height: 10px; border-radius: 50%; background: var(--color-ink); }
-input[type='range']::-moz-range-thumb { width: 10px; height: 10px; border: 0; border-radius: 50%; background: var(--color-ink); }
+input[type='range']::-webkit-slider-thumb { appearance: none; width: 10px; height: 10px; border-radius: 50%; background: var(--range-ink, var(--color-ink)); }
+input[type='range']::-moz-range-thumb { width: 10px; height: 10px; border: 0; border-radius: 50%; background: var(--range-ink, var(--color-ink)); }
 input[type='range']:disabled { opacity: 0.45; cursor: default; }
+
+/* A transparent inset outline is visible only in system forced-color modes. */
+:focus-visible { outline: 2px solid transparent; outline-offset: -2px; }
+:root :is(button, a[href], summary, [tabindex]):focus-visible,
+[cmdk-input]:focus-visible,
+:is(label, .row .data):has(> input[type='checkbox']:focus-visible) {
+  background-color: var(--focus-fill);
+}
+:is(input, select, textarea):focus-visible { border-color: var(--color-accent); }
+input[type='file']:focus-visible::file-selector-button { background-color: var(--focus-fill); }
+input[type='range']:focus-visible { --range-ink: var(--color-accent); }
+
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 8px; background: var(--color-rule); background-clip: padding-box; }

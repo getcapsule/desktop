@@ -8,7 +8,7 @@ export function StartupFailure({ error }: { error: unknown }) {
       <h1 className="text-lg font-semibold">The interface couldn’t start</h1>
       <p className="text-sm text-muted">Reload to try again. If this keeps happening, include the error below in your bug report.</p>
       <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-ground p-3 text-xs">{reason.slice(0, 2000)}</pre>
-      <button className="rounded border border-rule px-3 py-2 text-sm hover:border-accent focus-visible:outline-accent" onClick={() => window.location.reload()}>Reload capsule</button>
+      <button className="rounded border border-rule px-3 py-2 text-sm hover:border-accent" onClick={() => window.location.reload()}>Reload capsule</button>
     </section>
   </main>
 }

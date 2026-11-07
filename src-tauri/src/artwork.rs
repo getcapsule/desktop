@@ -110,7 +110,14 @@ fn content_type(url: &str) -> &'static str {
     }
 }
 
-pub fn parse_request(uri: &str) -> Option<(String, u32, bool)> {
+#[derive(Debug, PartialEq, Eq)]
+enum ArtworkMode {
+    Standard,
+    CacheOnly,
+    Upgrade,
+}
+
+fn parse_request(uri: &str) -> Option<(String, u32, ArtworkMode)> {
     let parsed = url::Url::parse(uri).ok()?;
     let id = parsed
         .path_segments()
@@ -131,10 +138,20 @@ pub fn parse_request(uri: &str) -> Option<(String, u32, bool)> {
     } else {
         raw.clamp(32, crate::db::MAX_ARTWORK)
     };
-    let cache_only = parsed
+    let mode = if parsed
         .query_pairs()
-        .any(|(key, value)| key == "cache" && value == "only");
-    Some((id, size, cache_only))
+        .any(|(key, value)| key == "cache" && value == "only")
+    {
+        ArtworkMode::CacheOnly
+    } else if parsed
+        .query_pairs()
+        .any(|(key, value)| key == "quality" && value == "high")
+    {
+        ArtworkMode::Upgrade
+    } else {
+        ArtworkMode::Standard
+    };
+    Some((id, size, mode))
 }
 
 pub fn handle(
@@ -419,9 +436,6 @@ async fn ensure_import_cached(
     template: &str,
     size: u32,
 ) -> Result<(Vec<u8>, &'static str), &'static str> {
-    use std::{sync::OnceLock, time::Duration};
-    static CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
-    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
     let url = imported_artwork_url(&resolve_template(template, size))?;
     let path = cache_path(dir, template, size);
     if tokio::fs::metadata(&path)
@@ -436,6 +450,17 @@ async fn ensure_import_cached(
             }
         }
     }
+    let (bytes, mime) = fetch_imported_artwork(url).await?;
+    if tokio::fs::create_dir_all(dir).await.is_ok() {
+        let _ = tokio::fs::write(&path, &bytes).await;
+    }
+    Ok((bytes, mime))
+}
+
+async fn fetch_imported_artwork(url: url::Url) -> Result<(Vec<u8>, &'static str), &'static str> {
+    use std::{sync::OnceLock, time::Duration};
+    static CLIENT: OnceLock<Result<reqwest::Client, reqwest::Error>> = OnceLock::new();
+    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
     let _permit = tokio::time::timeout(Duration::from_secs(15), SLOTS.acquire())
         .await
         .map_err(|_| "Imported artwork service is busy.")?
@@ -456,11 +481,106 @@ async fn ensure_import_cached(
         .send()
         .await
         .map_err(|_| "Imported artwork could not be fetched.")?;
-    let (bytes, mime) = imported_response_bytes(response).await?;
-    if tokio::fs::create_dir_all(dir).await.is_ok() {
-        let _ = tokio::fs::write(&path, &bytes).await;
+    imported_response_bytes(response).await
+}
+
+fn upgrade_sources(art: &crate::db::Artwork, display: u32) -> Vec<url::Url> {
+    let Ok(original) = imported_artwork_url(&art.template) else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    const SPOTIFY_COVER_PREFIX: &str = "/image/ab67616d0000";
+    if original.host_str() == Some("i.scdn.co") {
+        if let Some(suffix) = original
+            .path()
+            .strip_prefix(SPOTIFY_COVER_PREFIX)
+            .filter(|id| id.len() == 28 && id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            let (size, image) = suffix.split_at(4);
+            if matches!(size, "4851" | "1e02" | "b273" | "82c1") {
+                // Known variants of the same CDN image, in 2000 px and 640 px.
+                for variant in ["82c1", "b273"] {
+                    let mut url = original.clone();
+                    url.set_path(&format!("{SPOTIFY_COVER_PREFIX}{variant}{image}"));
+                    candidates.push(url);
+                }
+            }
+        }
     }
-    Ok((bytes, mime))
+    for size in [art.best_size(), art.clamp(640), art.clamp(display)] {
+        if let Ok(url) = imported_artwork_url(&resolve_template(&art.template, size)) {
+            if !candidates.contains(&url) {
+                candidates.push(url);
+            }
+        }
+    }
+    if !art.template.contains('{') && !candidates.contains(&original) {
+        candidates.push(original);
+    }
+    candidates
+}
+
+fn resize_upgrade(bytes: Vec<u8>, display: u32) -> image::ImageResult<Vec<u8>> {
+    use std::io::Cursor;
+    let mut reader = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(crate::db::MAX_ARTWORK);
+    limits.max_image_height = Some(crate::db::MAX_ARTWORK);
+    limits.max_alloc = Some(64 * 1024 * 1024);
+    reader.limits(limits);
+    let mut image = reader.decode()?;
+    if image.width().max(image.height()) > display {
+        image = image.thumbnail(display, display);
+    }
+    let mut resized = Cursor::new(Vec::new());
+    image.write_to(&mut resized, image::ImageFormat::Png)?;
+    Ok(resized.into_inner())
+}
+
+async fn upgraded_artwork(
+    dir: &Path,
+    art: &crate::db::Artwork,
+    display: u32,
+) -> Result<http::Response<Vec<u8>>, &'static str> {
+    static DECODE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let display = display.clamp(32, 512);
+    let sources = upgrade_sources(art, display);
+    if sources.is_empty() {
+        return Err("No supported higher-resolution artwork source.");
+    }
+    let path = cache_path(dir, &format!("homepage-hd-v1:{}", art.template), display);
+    if let Some(response) = cached_upgrade(&path).await {
+        return Ok(response);
+    }
+    // Keep one full-size image in memory at a time, including while downsampling.
+    let _permit = DECODE.acquire().await.map_err(|_| "Artwork upgrade stopped.")?;
+    if let Some(response) = cached_upgrade(&path).await {
+        return Ok(response);
+    }
+    for url in sources {
+        let Ok((bytes, _)) = fetch_imported_artwork(url).await else {
+            continue;
+        };
+        let Ok(Ok(bytes)) = tokio::task::spawn_blocking(move || resize_upgrade(bytes, display)).await
+        else {
+            continue;
+        };
+        if tokio::fs::create_dir_all(dir).await.is_ok() {
+            let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+            if tokio::fs::write(&temporary, &bytes).await.is_err()
+                || tokio::fs::rename(&temporary, &path).await.is_err()
+            {
+                let _ = tokio::fs::remove_file(&temporary).await;
+            }
+        }
+        return Ok(ok_response(bytes, "image/png"));
+    }
+    Err("Higher-resolution artwork was unavailable.")
+}
+
+async fn cached_upgrade(path: &Path) -> Option<http::Response<Vec<u8>>> {
+    let bytes = tokio::fs::read(path).await.ok()?;
+    (raster_type(&bytes) == Some("image/png")).then(|| ok_response(bytes, "image/png"))
 }
 
 async fn offline_artwork(
@@ -472,9 +592,13 @@ async fn offline_artwork(
     if imported {
         imported_artwork_url(&resolve_template(&art.template, size))?;
     }
-    // Homepage may reuse covers cached at library and transport sizes.
+    // Prefer a cached cover large enough for the card, then the best smaller copy.
     // Cache misses must never reach the remote artwork fetchers.
-    for want in [size, art.clamp(96), art.clamp(56)] {
+    let mut sizes = vec![size];
+    sizes.extend([320, 300, 192, 128, 96, 88, 56, 40].map(|side| art.clamp(side)));
+    sizes.sort_unstable_by_key(|&side| (side < size, side.abs_diff(size)));
+    sizes.dedup();
+    for want in sizes {
         let path = cache_path(dir, &art.template, want);
         if imported
             && !tokio::fs::metadata(&path)
@@ -485,7 +609,13 @@ async fn offline_artwork(
         }
         if let Ok(bytes) = tokio::fs::read(&path).await {
             if let Some(mime) = raster_type(&bytes) {
-                return Ok(ok_response(bytes, mime));
+                let mut response = ok_response(bytes, mime);
+                // Revisit disk on the next load so a newer cached size can replace a thumbnail.
+                response.headers_mut().insert(
+                    http::header::CACHE_CONTROL,
+                    http::HeaderValue::from_static("no-store"),
+                );
+                return Ok(response);
             }
         }
     }
@@ -496,7 +626,7 @@ async fn serve(
     app: &tauri::AppHandle,
     uri: &str,
 ) -> Result<http::Response<Vec<u8>>, Box<dyn std::error::Error + Send + Sync>> {
-    let (id, size, cache_only) = parse_request(uri).ok_or("malformed artwork uri")?;
+    let (id, size, mode) = parse_request(uri).ok_or("malformed artwork uri")?;
 
     if id.starts_with(crate::qol::PLAYLIST_COVER_PREFIX) {
         let bytes = crate::qol::playlist_cover(app, &id).ok_or("no playlist cover for id")?;
@@ -537,8 +667,11 @@ async fn serve(
             imported.clamp(size)
         };
         let dir = cache_dir(app.path().app_data_dir().ok()).ok_or("no cache dir")?;
-        if cache_only {
+        if mode == ArtworkMode::CacheOnly {
             return offline_artwork(&dir, &imported, want, true).await;
+        }
+        if mode == ArtworkMode::Upgrade {
+            return Ok(upgraded_artwork(&dir, &imported, size).await?);
         }
         let (bytes, mime) = ensure_import_cached(&dir, &imported.template, want).await?;
         return Ok(ok_response(bytes, mime));
@@ -551,8 +684,11 @@ async fn serve(
         art.clamp(size)
     };
     let dir = cache_dir(app.path().app_data_dir().ok()).ok_or("no cache dir")?;
-    if cache_only {
+    if mode == ArtworkMode::CacheOnly {
         return offline_artwork(&dir, &art, want, false).await;
+    }
+    if mode == ArtworkMode::Upgrade {
+        return Ok(upgraded_artwork(&dir, &art, size).await?);
     }
     let bytes = ensure_cached(&dir, &art.template, want, signer(app).as_deref()).await?;
     Ok(ok_response(
@@ -702,7 +838,58 @@ mod tests {
         let response = offline_artwork(&dir, &art, 192, true).await.unwrap();
         assert_eq!(response.headers()["Content-Type"], "image/png");
         assert_eq!(response.body().as_slice(), png);
+
+        let transport = b"\x89PNG\r\n\x1a\ntransport-cover";
+        tokio::fs::write(cache_path(&dir, &art.template, 88), transport)
+            .await
+            .unwrap();
+        let response = offline_artwork(&dir, &art, 320, true).await.unwrap();
+        assert_eq!(response.body().as_slice(), transport);
+
+        let large = b"\x89PNG\r\n\x1a\nlarge-cover";
+        tokio::fs::write(cache_path(&dir, &art.template, 300), large)
+            .await
+            .unwrap();
+        let response = offline_artwork(&dir, &art, 320, true).await.unwrap();
+        assert_eq!(response.body().as_slice(), large);
+        assert_eq!(response.headers()["Cache-Control"], "no-store");
         tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[test]
+    fn homepage_upgrade_uses_provider_sizes_and_keeps_the_original_as_fallback() {
+        let spotify = crate::db::Artwork {
+            template: "https://i.scdn.co/image/ab67616d00004851ff9ca10b55ce82ae553c8228".into(),
+            max_side: None,
+        };
+        let urls = upgrade_sources(&spotify, 320);
+        assert!(urls[0].path().contains("ab67616d000082c1"));
+        assert!(urls[1].path().contains("ab67616d0000b273"));
+        assert_eq!(urls.last().unwrap().as_str(), spotify.template);
+
+        let apple = crate::db::Artwork {
+            template: "https://is1-ssl.mzstatic.com/image/cover/{w}x{h}bb.jpg".into(),
+            max_side: Some(4000),
+        };
+        assert!(upgrade_sources(&apple, 320)[0].path().ends_with("/3000x3000bb.jpg"));
+        let hostile = crate::db::Artwork {
+            template: "https://example.invalid/{w}x{h}.jpg".into(),
+            ..apple
+        };
+        assert!(upgrade_sources(&hostile, 320).is_empty());
+    }
+
+    #[test]
+    fn homepage_upgrade_downsizes_artwork_without_upscaling_thumbnails() {
+        for (source, expected) in [((640, 480), (320, 240)), ((64, 64), (64, 64))] {
+            let mut raw = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(source.0, source.1)
+                .write_to(&mut raw, image::ImageFormat::Png)
+                .unwrap();
+            let resized = resize_upgrade(raw.into_inner(), 320).unwrap();
+            let image = image::load_from_memory(&resized).unwrap();
+            assert_eq!((image.width(), image.height()), expected);
+        }
     }
 
     #[test]
@@ -874,14 +1061,23 @@ mod tests {
 
     #[test]
     fn parses_id_and_size() {
-        let (id, size, cache_only) = parse_request("artwork://localhost/l.abc123?w=600").unwrap();
+        let (id, size, mode) = parse_request("artwork://localhost/l.abc123?w=600").unwrap();
         assert_eq!(id, "l.abc123");
         assert_eq!(size, 600);
-        assert!(!cache_only);
-        assert!(
+        assert_eq!(mode, ArtworkMode::Standard);
+        assert_eq!(
             parse_request("artwork://localhost/l.abc123?w=600&cache=only")
                 .unwrap()
-                .2
+                .2,
+            ArtworkMode::CacheOnly
+        );
+        assert_eq!(
+            parse_request("artwork://localhost/l.abc123?w=320&quality=high").unwrap().2,
+            ArtworkMode::Upgrade
+        );
+        assert_eq!(
+            parse_request("artwork://localhost/l.abc123?w=320&quality=high&cache=only").unwrap().2,
+            ArtworkMode::CacheOnly
         );
     }
 

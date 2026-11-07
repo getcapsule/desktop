@@ -272,6 +272,7 @@ fn init_tracing() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
+    webview::apply_webview_flags();
 
     tracing::info!("capsule starting ({})", config::describe());
 
@@ -488,7 +489,6 @@ pub fn run() {
                     .clone()
             });
 
-            webview::apply_webview_flags();
             desktop::initialize(&handle);
             commands::reconcile_backend(&handle, active_source);
             qol::initialize(&handle);

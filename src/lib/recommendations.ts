@@ -1,4 +1,4 @@
-import type { SongRow } from './ipc'
+import type { AlbumRow, SongRow } from './ipc'
 import type { SongEntry } from './qol-ipc'
 
 const normalize = (name: string) => name.trim().toLowerCase()
@@ -29,7 +29,7 @@ export function listeningTaste(history: SongEntry[], favorites: SongEntry[]) {
   return { artists, albums, heard, liked }
 }
 
-export function recommendSongs(songs: SongRow[], taste: ReturnType<typeof listeningTaste>) {
+export function recommendSongs(songs: SongRow[], taste: ReturnType<typeof listeningTaste>, limit = 12) {
   const unique = new Map<string, SongRow>()
   for (const song of songs) {
     const key = trackKey(song)
@@ -54,7 +54,48 @@ export function recommendSongs(songs: SongRow[], taste: ReturnType<typeof listen
       picks.push(song)
       counts.set(artist, count + 1)
     }
-    if (picks.length === 12) return picks
+    if (picks.length === limit) return picks
   }
-  return [...picks, ...remaining].slice(0, 12)
+  return [...picks, ...remaining].slice(0, limit)
+}
+
+export function recommendReleases(songs: SongRow[], albums: AlbumRow[], taste: ReturnType<typeof listeningTaste>) {
+  const albumsByCredit = new Map<string, AlbumRow | null>()
+  const albumsByCover = new Map<string, AlbumRow | null>()
+  for (const album of albums) {
+    const name = normalize(album.name)
+    if (!name || !album.track_count) continue
+    const credit = `${normalize(album.artist_name)}\0${name}`
+    albumsByCredit.set(credit, albumsByCredit.has(credit) ? null : album)
+    if (album.artwork_url) {
+      const cover = `${name}\0${album.artwork_url}`
+      albumsByCover.set(cover, albumsByCover.has(cover) ? null : album)
+    }
+  }
+
+  const releases = new Map<string, { album: AlbumRow; song: SongRow }>()
+  const standalone = new Map<string, { album: undefined; song: SongRow }>()
+  for (const song of recommendSongs(songs, taste, songs.length)) {
+    const credit = albumsByCredit.get(albumKey(song))
+    const cover = song.artwork_url ? albumsByCover.get(`${normalize(song.album_name)}\0${song.artwork_url}`) : undefined
+    const album = cover ?? credit
+    if (album) {
+      if (!releases.has(album.id)) releases.set(album.id, { album, song })
+    } else if (!standalone.has(song.id)) standalone.set(song.id, { album: undefined, song })
+    if (releases.size === 12) break
+  }
+  return [...releases.values(), ...standalone.values()].slice(0, 12)
+}
+
+export function repeatedSongs(songs: SongRow[], history: SongEntry[]) {
+  const counts = new Map<string, number>()
+  for (const { song } of history) {
+    const key = trackKey(song)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  const available = new Map(songs.map(song => [trackKey(song), song]))
+  return [...counts].sort((a, b) => b[1] - a[1]).flatMap(([key, count]) => {
+    const song = available.get(key)
+    return count > 1 && song ? [song] : []
+  }).slice(0, 12)
 }

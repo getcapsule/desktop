@@ -1,5 +1,5 @@
 //! Canonical import queues use the existing player and native audio engine.
-//! A verified provider mapping selects playback; metadata alone never does.
+//! Verified provider mappings select playback, with a session-only fallback after failure.
 use super::model::Platform;
 use crate::{
     player::{EngineCommand, Status},
@@ -128,7 +128,7 @@ impl Recovery {
         }
     }
 
-    fn after_denial(&self, selected: Option<Route>, requested: Option<&Route>) -> Option<Route> {
+    fn after_failure(&self, selected: Option<Route>, requested: Option<&Route>) -> Option<Route> {
         let denied = self.denied_soundcloud.as_ref();
         if denied.is_some_and(|route| {
             requested == Some(route)
@@ -136,6 +136,8 @@ impl Recovery {
                     && selected.as_ref().is_some_and(|selected| {
                         selected == route || selected.provider == Platform::Youtube
                     }))
+        }) || selected.as_ref().is_none_or(|route| {
+            route.provider == Platform::Youtube && self.tried.contains(&route.external_id)
         }) {
             return self.fallback.clone();
         }
@@ -329,7 +331,7 @@ pub fn report_native_error(app: &AppHandle, state: &AppState, error: &str) {
     fail(app, state, native_error_message(error));
 }
 
-/// Native failures exhaust plausible recordings before asking the listener.
+/// Native failures try ranked recordings before asking the listener.
 pub fn report_native_failure(app: &AppHandle, track_id: &str, message: &str) -> bool {
     let Some(playback) = app.try_state::<State>() else {
         return false;
@@ -527,23 +529,16 @@ fn start_automatic_playback(app: &AppHandle, track_id: &str) -> bool {
                     return;
                 }
             };
-            if imports
-                .db
-                .lock()
-                .expect("import db")
-                .verify_candidate(&track_id, Platform::Youtube, &candidate.external_id)
-                .is_err()
-            {
-                recovery.busy = false;
-                return;
-            }
-            if crate::youtube_native::send_if_current(
+            let sent = match crate::youtube_native::send_if_current(
                 &app,
                 &track_id,
                 &candidate.external_id,
                 revision,
-            ) == Ok(true)
-            {
+            ) {
+                Ok(sent) => sent,
+                Err(_) => continue,
+            };
+            if sent {
                 let mut active = playback.active.lock().expect("import playback");
                 let mut player = state.player.lock().expect("player mutex");
                 if player.state().playback_revision == revision
@@ -556,9 +551,7 @@ fn start_automatic_playback(app: &AppHandle, track_id: &str) -> bool {
                         provider: Platform::Youtube,
                         external_id: candidate.external_id,
                     };
-                    if recovery.denied_soundcloud.is_some() {
-                        recovery.fallback = Some(route.clone());
-                    }
+                    recovery.fallback = Some(route.clone());
                     *active = Some(Session {
                         track_id: track_id.clone(),
                         route: Some(route),
@@ -878,7 +871,7 @@ pub fn dispatch(app: &AppHandle, state: &AppState, commands: &[EngineCommand]) -
             recovery.denied_soundcloud.as_ref(),
         );
         let route = if allowed {
-            recovery.after_denial(route, requested.as_ref())
+            recovery.after_failure(route, requested.as_ref())
         } else {
             route
         };
@@ -1113,13 +1106,13 @@ mod tests {
     }
 
     #[test]
-    fn playback_controls_keep_the_verified_fallback_after_soundcloud_denial() {
+    fn playback_controls_keep_the_session_fallback_after_soundcloud_denial() {
         let requested = route(Platform::Soundcloud, true, true).route;
         let youtube = route(Platform::Youtube, true, true).route;
         let mut recovery = Recovery::default();
         recovery.record_failure(requested.clone(), crate::soundcloud::FULL_PLAYBACK_DENIED);
         let select = |recovery: &Recovery| {
-            recovery.after_denial(Some(requested.clone()), Some(&requested))
+            recovery.after_failure(Some(requested.clone()), Some(&requested))
         };
         // Pause and seek can reach dispatch while the alternate recording is still resolving.
         assert_eq!(select(&recovery), None);
@@ -1127,6 +1120,32 @@ mod tests {
         assert_eq!(select(&recovery), Some(youtube));
         recovery.reset("next-occurrence");
         assert_eq!(select(&recovery), Some(requested));
+    }
+
+    #[test]
+    fn playback_controls_keep_a_session_fallback_when_the_saved_recording_failed() {
+        let saved = route(Platform::Youtube, true, true).route;
+        let fallback = Route {
+            external_id: "abcdefghijk".into(),
+            ..saved.clone()
+        };
+        let local = route(Platform::Local, true, true).route;
+        let mut recovery = Recovery::default();
+        recovery.record_failure(saved.clone(), "connection lost");
+        recovery.fallback = Some(fallback.clone());
+        assert_eq!(recovery.after_failure(None, None), Some(fallback.clone()));
+        assert_eq!(
+            recovery.after_failure(Some(saved.clone()), None),
+            Some(fallback.clone())
+        );
+        assert_eq!(
+            recovery.after_failure(Some(local.clone()), None),
+            Some(local)
+        );
+        recovery.record_failure(fallback, "connection lost");
+        assert_eq!(recovery.after_failure(Some(saved.clone()), None), None);
+        recovery.reset("next-occurrence");
+        assert_eq!(recovery.after_failure(Some(saved.clone()), None), Some(saved));
     }
     #[test]
     fn native_errors_identify_the_failure_without_exposing_raw_details() {

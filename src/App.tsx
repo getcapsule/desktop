@@ -261,7 +261,7 @@ export default function App() {
           onChange={(e) => setQuery(e.target.value)}
           placeholder={detail ? `Search this ${detail.kind}` : view === 'favorites' ? 'Search favorites' : view === 'history' ? 'Search recently played' : 'Search your library'}
           aria-label="Search your library"
-          className="min-w-0 flex-1 bg-transparent text-xs text-ink outline-none placeholder:text-muted"
+          className="min-w-0 flex-1 bg-transparent text-xs text-ink placeholder:text-muted"
         />
         <button
           onClick={() => setPaletteOpen(true)}
@@ -281,7 +281,7 @@ export default function App() {
       <div className="app-body flex min-h-0 flex-1">
         <nav aria-label="Main navigation" className="sidebar chrome flex shrink-0 flex-col gap-0.5">
           <div className="sidebar-links flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto">
-          <Tab icon="home" on={view === 'discover' && !results} onClick={() => { setQuery(''); setDetail(null); setView('discover') }}>Homepage</Tab>
+          <Tab icon="home" on={view === 'discover' && !results} onClick={() => { setQuery(''); setDetail(null); setArtistName(null); setView('discover') }}>Homepage</Tab>
           <div className="px-4 pt-2 pb-1.5 label">
             Library
           </div>
@@ -381,7 +381,7 @@ export default function App() {
             {view === 'downloads' ? (
               <Downloads />
             ) : view === 'discover' && !results ? (
-              <Discover canPlay={canPlay} onPlayed={() => setRevision(value => value + 1)} />
+              <Discover albums={albums} albumsLoading={albumRows.loading} canPlay={canPlay} onPlayed={() => setRevision(value => value + 1)} />
             ) : view === 'settings' && !results ? (
               <SettingsView focusTrackId={focusTrackId ?? undefined} />
             ) : view === 'queue' && !results ? (
@@ -449,7 +449,7 @@ export default function App() {
                     }}
                     role="button"
                     tabIndex={0}
-                    className="row mx-2 flex h-10 items-center gap-3 px-2 outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                    className="row mx-2 flex h-10 items-center gap-3 px-2"
                     title="Open, or double-click to play"
                   >
                     <Art id={listening.playlists.find(playlist => playlist.id === p.id)?.cover_id ?? p.id} />
@@ -466,7 +466,7 @@ export default function App() {
       <CommandPalette
         open={paletteOpen}
         onOpenChange={setPaletteOpen}
-        onNavigate={next => { setQuery(''); setDetail(null); setView(next) }}
+        onNavigate={next => { setQuery(''); setDetail(null); if (next === 'discover') setArtistName(null); setView(next) }}
         albums={albums}
         playlists={[...listening.playlists.map(p => ({ id: p.id, name: p.name, artwork_url: null })), ...playlists]}
         localPlaylists={listening.playlists}

@@ -1,23 +1,27 @@
-import { useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { useContext, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { DownloadButton } from './Downloads'
 import { NavigationIcon } from './icons'
 import { ListeningContext } from './ListeningTools'
 import { PlaylistDialog } from './PlaylistDialog'
 import { discover, type DiscoverAlbum, type DiscoverArtist, type DiscoverTrack, type SearchKind, type SearchResults } from '../lib/discover-ipc'
 import { qol } from '../lib/qol-ipc'
-import { artworkUrl, formatTime, library, type SongRow } from '../lib/ipc'
-import { listeningTaste, recommendSongs } from '../lib/recommendations'
+import { artworkUrl, formatTime, library, type AlbumRow, type SongRow } from '../lib/ipc'
+import { listeningTaste, recommendReleases, recommendSongs, repeatedSongs } from '../lib/recommendations'
+import { editorialPlaylists, type EditorialTrack } from '../lib/editorial-playlists'
 
 const EMPTY: SearchResults = { tracks: [], artists: [], albums: [] }
-const button = 'rounded border border-rule px-3 py-1.5 text-xs transition-colors hover:border-muted focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40'
+const button = 'rounded border border-rule px-3 py-1.5 text-xs transition-colors hover:border-muted disabled:opacity-40'
 const gridClass = 'grid grid-cols-[repeat(auto-fill,minmax(min(100%,11rem),1fr))] gap-3'
 const cardClass = 'flex min-w-0 flex-col gap-2 rounded-lg border border-rule bg-panel/40 p-2'
 const rowClass = 'row flex min-h-12 items-center gap-3 rounded px-2 py-1'
 const layoutKey = 'capsule-homepage-layout'
+const noAlbums: AlbumRow[] = []
 type Detail = { kind: 'artist' | 'album'; id: string; title: string }
 type Layout = 'list' | 'grid'
 
-export function Discover({ canPlay, onPlayed }: { canPlay?: (song: SongRow) => boolean; onPlayed?: () => void } = {}) {
+export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, onPlayed }: {
+  albums?: AlbumRow[]; albumsLoading?: boolean; canPlay?: (song: SongRow) => boolean; onPlayed?: () => void
+} = {}) {
   const listening = useContext(ListeningContext)
   const [playlistTrack, setPlaylistTrack] = useState<DiscoverTrack | null>(null)
   const [query, setQuery] = useState('')
@@ -108,18 +112,18 @@ export function Discover({ canPlay, onPlayed }: { canPlay?: (song: SongRow) => b
         <div className="flex gap-1 rounded-md border border-rule p-0.5" role="group" aria-label="Homepage layout">
           {(['list', 'grid'] as const).map(value => <button
             key={value} type="button" aria-pressed={layout === value}
-            className={`rounded px-2.5 py-1 text-xs focus-visible:outline-2 focus-visible:outline-accent ${layout === value ? 'bg-ink/10 text-ink' : 'text-muted hover:text-ink'}`}
+            className={`rounded px-2.5 py-1 text-xs ${layout === value ? 'bg-ink/10 text-ink' : 'text-muted hover:text-ink'}`}
             onClick={() => chooseLayout(value)}
           >{value === 'list' ? 'List' : 'Grid'}</button>)}
         </div>
       </div>
       <form role="search" onSubmit={event => { event.preventDefault(); void search() }} className="flex gap-2">
-        <input type="search" aria-label="Search SoundCloud" placeholder="Search SoundCloud for songs, artists, or albums…" value={query} maxLength={512} onChange={event => setQuery(event.target.value)} className="min-w-0 flex-1 rounded border border-rule bg-ground px-3 py-2 text-sm outline-none focus:border-accent" />
+        <input type="search" aria-label="Search SoundCloud" placeholder="Search SoundCloud for songs, artists, or albums…" value={query} maxLength={512} onChange={event => setQuery(event.target.value)} className="min-w-0 flex-1 rounded border border-rule bg-ground px-3 py-2 text-sm" />
         <button type="submit" className={button}>Search</button>
       </form>
       <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-1" role="group" aria-label="Search category">
-          {(['tracks', 'artists', 'albums'] as const).map(value => <button key={value} aria-pressed={kind === value} className={`rounded px-3 py-1 text-xs focus-visible:outline-2 focus-visible:outline-accent ${kind === value ? 'bg-panel text-ink' : 'text-muted hover:text-ink'}`} onClick={() => { setKind(value); void search(value) }}>{value === 'tracks' ? 'Songs' : value === 'artists' ? 'Artists' : 'Albums'}</button>)}
+          {(['tracks', 'artists', 'albums'] as const).map(value => <button key={value} aria-pressed={kind === value} className={`rounded px-3 py-1 text-xs ${kind === value ? 'bg-panel text-ink' : 'text-muted hover:text-ink'}`} onClick={() => { setKind(value); void search(value) }}>{value === 'tracks' ? 'Songs' : value === 'artists' ? 'Artists' : 'Albums'}</button>)}
         </div>
         {submitted && <button className={button} onClick={() => { setQuery(''); void search(kind, 0, '') }}>Back to picks</button>}
       </div>
@@ -136,7 +140,11 @@ export function Discover({ canPlay, onPlayed }: { canPlay?: (song: SongRow) => b
       {loading ? 'Searching SoundCloud…' : count ? `${pageOffset + 1}–${pageOffset + count}${detail?.kind === 'album' ? ' tracks' : ' results'}` : 'No results'}
     </div>}
     <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4" aria-busy={loading}>
-      {showPicks ? <HomepagePicks key={listening?.source} grid={grid} canPlay={canPlay} onProblem={setProblem} /> : <div className={grid ? gridClass : undefined}>
+      {showPicks ? <HomepagePicks
+        key={`${listening?.source}:${listening?.context ?? ''}`}
+        grid={grid} albums={albums} albumsLoading={albumsLoading} canPlay={canPlay} onProblem={setProblem}
+        onSearch={term => { setKind('tracks'); setQuery(term); void search('tracks', 0, term) }}
+      /> : <div className={grid ? gridClass : undefined}>
         {!loading && (detail || kind === 'tracks') && tracks.map((track, index) => <div key={`${track.id}-${index}`} className={grid ? cardClass : rowClass}>
           <Artwork url={track.artwork_url} grid={grid} />
           <TrackLabel title={track.title} artist={track.artist} album={track.album} />
@@ -148,7 +156,7 @@ export function Discover({ canPlay, onPlayed }: { canPlay?: (song: SongRow) => b
           </div>
         </div>)}
         {!loading && !detail && kind === 'artists' && results.artists.map(artist => <button
-          key={artist.id} className={`${grid ? cardClass : rowClass} w-full text-left focus-visible:outline-2 focus-visible:outline-accent`}
+          key={artist.id} className={`${grid ? cardClass : rowClass} w-full text-left`}
           onClick={() => void open(artist, 'artist')}
         >
           <Artwork url={artist.artwork_url} grid={grid} />
@@ -156,7 +164,7 @@ export function Discover({ canPlay, onPlayed }: { canPlay?: (song: SongRow) => b
           <span className="text-xs text-muted">View songs</span>
         </button>)}
         {!loading && !detail && kind === 'albums' && results.albums.map(album => <button
-          key={album.id} className={`${grid ? cardClass : rowClass} w-full text-left focus-visible:outline-2 focus-visible:outline-accent`}
+          key={album.id} className={`${grid ? cardClass : rowClass} w-full text-left`}
           onClick={() => void open(album, 'album')}
         >
           <Artwork url={album.artwork_url} grid={grid} />
@@ -178,7 +186,20 @@ export function Discover({ canPlay, onPlayed }: { canPlay?: (song: SongRow) => b
   </section>
 }
 
-function HomepagePicks({ grid, canPlay, onProblem }: { grid: boolean; canPlay?: (song: SongRow) => boolean; onProblem: (message: string | null) => void }) {
+type HomeCollection = {
+  id: string; name: string; description: string; cover?: string | null; coverUpgrade?: string
+} & (
+  | { kind: 'album'; albumId: string }
+  | { kind: 'track' | 'mix'; songs: SongRow[] }
+  | { kind: 'playlist'; tracks: EditorialTrack[] }
+)
+type CollectionTrack = EditorialTrack & { song?: SongRow }
+const capsulePicks: HomeCollection[] = editorialPlaylists.map(playlist => ({ ...playlist, kind: 'playlist' }))
+
+function HomepagePicks({ grid, albums, albumsLoading, canPlay, onProblem, onSearch }: {
+  grid: boolean; albums: AlbumRow[]; albumsLoading: boolean; canPlay?: (song: SongRow) => boolean
+  onProblem: (message: string | null) => void; onSearch: (term: string) => void
+}) {
   const listening = useContext(ListeningContext)
   const snapshot = listening?.snapshot
   const taste = useMemo(() => listeningTaste(snapshot?.history ?? [], snapshot?.favorites ?? []), [snapshot?.history, snapshot?.favorites])
@@ -187,7 +208,23 @@ function HomepagePicks({ grid, canPlay, onProblem }: { grid: boolean; canPlay?: 
   const [problem, setProblem] = useState(false)
   const [retry, setRetry] = useState(0)
   const [playing, setPlaying] = useState(false)
+  const [collection, setCollection] = useState<HomeCollection | null>(null)
+  const [entries, setEntries] = useState<CollectionTrack[] | null>(null)
+  const [collectionError, setCollectionError] = useState('')
+  const request = useRef(0)
+  const backButton = useRef<HTMLButtonElement>(null)
+  const cardId = useId()
+  const previousCard = useRef<string | null>(null)
   const source = listening?.source
+  const revision = listening?.artworkRevision
+  useEffect(() => () => { request.current++ }, [])
+  useEffect(() => {
+    if (collection) backButton.current?.focus()
+    else if (previousCard.current) {
+      document.getElementById(`${cardId}-${previousCard.current}`)?.focus()
+      previousCard.current = null
+    }
+  }, [cardId, collection])
 
   useEffect(() => {
     if (!source) return
@@ -201,37 +238,123 @@ function HomepagePicks({ grid, canPlay, onProblem }: { grid: boolean; canPlay?: 
       if (active) setSongs(rows.flat())
     }).catch(() => { if (active) setProblem(true) })
     return () => { active = false }
-  }, [artists, source, listening?.artworkRevision, retry])
+  }, [artists, source, revision, retry])
 
-  const picks = useMemo(() => {
+  const playable = useMemo(() => {
     const candidates = songs ?? []
-    return recommendSongs(canPlay ? candidates.filter(canPlay) : candidates, taste)
-  }, [songs, canPlay, taste])
+    return canPlay ? candidates.filter(canPlay) : candidates
+  }, [songs, canPlay])
+  const releases = useMemo(() => recommendReleases(playable, albums, taste), [playable, albums, taste])
   const title = taste.artists.size ? 'Picked for you' : 'From your library'
+  const rotation = useMemo(() => recommendSongs(playable, taste), [playable, taste])
+  const repeat = useMemo(() => repeatedSongs(playable, snapshot?.history ?? []), [playable, snapshot?.history])
+  const mixes: HomeCollection[] = []
+  if (taste.artists.size && rotation.length >= 2) {
+    mixes.push({ kind: 'mix', id: 'rotation', name: 'Your rotation', description: 'Favorites and nearby picks from your library.', songs: rotation })
+  }
+  if (repeat.length >= 2) {
+    mixes.push({ kind: 'mix', id: 'on-repeat', name: 'On repeat', description: 'Tracks you’ve played more than once.', songs: repeat })
+  }
+  const releaseCards: HomeCollection[] = releases.map(({ album, song }) => {
+    const cover = album?.artwork_url ? album.id : song.artwork_url ? song.id : null
+    const url = cover ? `${artworkUrl(cover, grid ? 320 : 88, revision)}&cache=only` : null
+    return album
+      ? {
+        kind: 'album', id: `album:${album.id}`, albumId: album.id, name: album.name, description: album.artist_name, cover: url,
+        coverUpgrade: cover ? `${artworkUrl(cover, 320, revision)}&quality=high` : undefined,
+      }
+      : { kind: 'track', id: `track:${song.id}`, name: song.name, description: song.artist_name, cover: url, songs: [song] }
+  })
 
-  async function play(song: SongRow) {
+  async function open(item: HomeCollection) {
+    const current = ++request.current
+    previousCard.current = item.id
+    setCollection(item); setEntries(null); setCollectionError(''); onProblem(null)
+    try {
+      const tracks = await collectionTracks(item, canPlay)
+      if (request.current === current) setEntries(tracks)
+    } catch (error) {
+      if (request.current === current) setCollectionError(String(error))
+    }
+  }
+
+  async function play(queue: SongRow[], index = 0) {
     setPlaying(true); onProblem(null)
-    try { await library.play([song], 0) }
+    try { await library.play(queue, index) }
     catch (error) { onProblem(String(error)) }
     finally { setPlaying(false) }
   }
 
-  return <section aria-label={title} className="pt-4">
-    <div className="mb-3">
-      <h2 className="text-sm font-semibold">{title}</h2>
-      <p className="mt-0.5 text-xs text-muted">Picks use your library, favorites, and recent plays on this device.</p>
+  if (collection) {
+    const queue = entries?.flatMap(entry => entry.song ? [entry.song] : []) ?? []
+    return <section aria-label={collection.name} className="space-y-3 pt-4">
+      <button ref={backButton} className={button} onClick={() => { request.current++; setCollection(null); onProblem(null) }}>Back to Homepage</button>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rule pb-3">
+        <div><h2 className="text-lg font-semibold">{collection.name}</h2><p className="text-xs text-muted">{collection.description}</p></div>
+        <button className={button} disabled={!queue.length || playing} onClick={() => void play(queue)}>
+          {collection.kind === 'playlist' && queue.length !== entries?.length ? 'Play cached tracks' : 'Play all'}
+        </button>
+      </div>
+      {collectionError ? <div role="alert" className="flex flex-wrap items-center gap-3 text-xs text-crit">
+        {collectionError}<button className={button} onClick={() => void open(collection)}>Retry</button>
+      </div> : !entries ? <p role="status" className="text-xs text-muted">Loading tracklist…</p>
+        : !entries.length ? <p className="text-xs text-muted">There are no cached tracks for this release.</p>
+        : <ol>{entries.map((entry, index) => <li key={index} className={rowClass}>
+          <span className="w-6 shrink-0 text-right font-mono text-[10px] text-muted">{index + 1}</span>
+          <TrackLabel title={entry.name} artist={entry.artist} />
+          {entry.song ? <>
+            <span className="font-mono text-[10px] text-muted">{formatTime(entry.song.duration_ms)}</span>
+            <button className={button} disabled={playing} aria-label={`Play ${entry.name}`}
+              onClick={() => void play(queue, entries.slice(0, index).filter(row => row.song).length)}>Play</button>
+          </> : collection.kind === 'playlist' ? <button className={button} aria-label={`Search SoundCloud for ${entry.name} by ${entry.artist}`}
+            onClick={() => onSearch(`${entry.artist} ${entry.name}`)}>Search SoundCloud</button>
+            : <span className="text-xs text-muted">Unavailable</span>}
+        </li>)}</ol>}
+    </section>
+  }
+
+  return <div className="space-y-6 pt-4">
+    <CollectionShelf cardId={cardId} title={title} description="Picks use your library, favorites, and recent plays on this device." grid={grid} items={albumsLoading ? [] : releaseCards} onOpen={open}>
+      {problem ? <div role="alert" className="flex items-center gap-3 text-xs text-muted">Couldn’t load picks from your library.<button className={button} onClick={() => setRetry(value => value + 1)}>Retry</button></div>
+        : (albumsLoading || !songs && source) ? <p role="status" className="text-xs text-muted">Finding picks in your library…</p>
+        : !releaseCards.length && <p className="text-xs text-muted">Add music to your library to see picks here. You can also search SoundCloud above.</p>}
+    </CollectionShelf>
+    {mixes.length > 0 && <CollectionShelf cardId={cardId} title="Made for you" description="Mixes assembled on this device." grid={grid} items={mixes} onOpen={open} />}
+    <CollectionShelf cardId={cardId} title="Capsule Picks" description="Fixed tracklists curated by Capsule." grid={grid} items={capsulePicks} onOpen={open} />
+  </div>
+}
+
+async function collectionTracks(collection: HomeCollection, canPlay?: (song: SongRow) => boolean): Promise<CollectionTrack[]> {
+  if (collection.kind === 'playlist') {
+    return Promise.all(collection.tracks.map(async track => {
+      const results = await library.search(track.name, 100)
+      const song = results.find(row => row.name.trim().toLowerCase() === track.name.toLowerCase()
+        && row.artist_name.trim().toLowerCase() === track.artist.toLowerCase() && (canPlay?.(row) ?? true))
+      return { ...track, song }
+    }))
+  }
+  const songs = collection.kind === 'album' ? await library.albumSongs(collection.albumId) : collection.songs
+  return songs.map(song => ({ name: song.name, artist: song.artist_name, song: (canPlay?.(song) ?? true) ? song : undefined }))
+}
+
+function CollectionShelf({ cardId, title, description, grid, items, onOpen, children }: {
+  cardId: string; title: string; description: string; grid: boolean; items: HomeCollection[]
+  onOpen: (item: HomeCollection) => void; children?: React.ReactNode
+}) {
+  return <section aria-label={title}>
+    <h2 className="text-sm font-semibold">{title}</h2>
+    <p className="mb-3 mt-0.5 text-xs text-muted">{description}</p>
+    {children}
+    <div className={grid ? gridClass : undefined}>
+      {items.map(item => <button id={`${cardId}-${item.id}`} key={item.id} type="button"
+        aria-label={`Open ${item.kind} ${item.name}${item.kind === 'album' ? ` by ${item.description}` : ''}`}
+        className={`${grid ? cardClass : rowClass} w-full text-left hover:border-muted hover:bg-ink/5`}
+        onClick={() => onOpen(item)}>
+        <Artwork url={item.cover ?? null} upgradeUrl={item.coverUpgrade} grid={grid} icon={item.kind === 'album' ? 'albums' : item.kind === 'track' ? 'songs' : 'playlists'} />
+        <TrackLabel title={item.name} artist={item.description} />
+        <span className="shrink-0 text-xs capitalize text-muted">{item.kind}</span>
+      </button>)}
     </div>
-    {problem ? <div role="alert" className="flex items-center gap-3 text-xs text-muted">Couldn’t load picks from your library.<button className={button} onClick={() => setRetry(value => value + 1)}>Retry</button></div>
-      : !songs && source ? <p role="status" className="text-xs text-muted">Finding picks in your library…</p>
-      : !picks.length ? <p className="text-xs text-muted">Add music to your library to see picks here. You can also search SoundCloud above.</p>
-      : <div className={grid ? gridClass : undefined}>
-        {picks.map(song => <div key={song.id} className={grid ? cardClass : rowClass}>
-          <Artwork url={song.artwork_url ? `${artworkUrl(song.id, 192)}&cache=only` : null} grid={grid} />
-          <TrackLabel title={song.name} artist={song.artist_name} album={song.album_name} />
-          <span className="font-mono text-[10px] text-muted">{formatTime(song.duration_ms)}</span>
-          <button aria-label={`Play ${song.name}`} className={grid ? `${button} self-start` : button} disabled={playing} onClick={() => void play(song)}>Play</button>
-        </div>)}
-      </div>}
   </section>
 }
 
@@ -239,10 +362,29 @@ function TrackLabel({ title, artist, album }: { title: string; artist: string; a
   return <span className="block min-w-0 flex-1"><span className="block truncate text-sm" title={title}>{title}</span><span className="block truncate text-xs text-muted">{artist}{album ? ` · ${album}` : ''}</span></span>
 }
 
-function Artwork({ url, grid }: { url: string | null; grid: boolean }) {
+function Artwork({ url, upgradeUrl, grid, icon = 'songs' }: {
+  url: string | null; upgradeUrl?: string; grid: boolean; icon?: 'albums' | 'songs' | 'playlists'
+}) {
   const [failed, setFailed] = useState<string | null>(null)
-  return <span aria-hidden="true" className={`relative grid shrink-0 place-items-center overflow-hidden rounded bg-panel text-muted ${grid ? 'aspect-square w-full' : 'h-9 w-9'}`}>
-    <NavigationIcon name="songs" size={grid ? 26 : 15} />
-    {url && failed !== url && <img alt="" src={url} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(url)} className="absolute inset-0 h-full w-full object-cover" />}
+  const frame = useRef<HTMLSpanElement>(null)
+  const [visibleUpgrade, setVisibleUpgrade] = useState<string>()
+  const [loadedUpgrade, setLoadedUpgrade] = useState<string>()
+  useEffect(() => {
+    if (!upgradeUrl || !frame.current || typeof IntersectionObserver === 'undefined') return
+    let active = true
+    const observer = new IntersectionObserver(entries => {
+      if (active && entries.some(entry => entry.isIntersecting)) {
+        setVisibleUpgrade(upgradeUrl)
+        observer.disconnect()
+      }
+    })
+    observer.observe(frame.current)
+    return () => { active = false; observer.disconnect() }
+  }, [upgradeUrl])
+  const upgraded = upgradeUrl && loadedUpgrade === upgradeUrl
+  return <span ref={frame} aria-hidden="true" className={`relative grid shrink-0 place-items-center overflow-hidden rounded bg-panel text-muted ${grid ? 'aspect-square w-full' : 'h-9 w-9'}`}>
+    <NavigationIcon name={icon} size={grid ? 26 : 15} />
+    {!upgraded && url && failed !== url && <img alt="" src={url} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(url)} className="absolute inset-0 h-full w-full object-cover" />}
+    {upgradeUrl && visibleUpgrade === upgradeUrl && <img alt="" src={upgradeUrl} referrerPolicy="no-referrer" onLoad={() => setLoadedUpgrade(upgradeUrl)} className={`absolute inset-0 h-full w-full object-cover ${upgraded ? '' : 'opacity-0'}`} />}
   </span>
 }

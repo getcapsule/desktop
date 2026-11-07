@@ -4,7 +4,7 @@ import { artworkUrl, settings, type Settings } from '../lib/ipc'
 import { SpotifySetup } from './SpotifySetup'
 
 const buttonClass = 'rounded border border-rule px-2.5 py-1.5 text-[11px] text-muted transition-colors hover:border-accent hover:text-ink disabled:cursor-not-allowed disabled:opacity-40'
-const fieldClass = 'min-w-0 flex-1 rounded border border-rule bg-ground px-3 py-2 text-[13px] text-ink placeholder:text-muted focus:border-accent focus:outline-none'
+const fieldClass = 'min-w-0 flex-1 rounded border border-rule bg-ground px-3 py-2 text-[13px] text-ink placeholder:text-muted'
 const providers: Record<MusicPlatform, string> = { spotify: 'Spotify', apple_music: 'Apple Music', youtube: 'YouTube Music', soundcloud: 'SoundCloud', navidrome: 'Navidrome', local: 'Local files' }
 const statuses: Record<string, string> = { fetching: 'Fetching metadata', ready: 'Ready to import', resolving: 'Finding playback sources', completed: 'Completed', interrupted: 'Interrupted', cancelled: 'Cancelled', error: 'Import failed', pending: 'Pending', searching: 'Searching', matched: 'Matched', needs_review: 'Needs review', unavailable: 'Unavailable' }
 const running = (job: ImportJob) => ['fetching', 'resolving', 'pending'].includes(job.status)
@@ -162,7 +162,7 @@ export function ImportURL({ onComplete, settingsDraft, editSettings, focusTrackI
       <p>{preview?.tracks.length ?? active.total_tracks} tracks · {active.processed} processed · {active.matched} matched · {active.needs_review} need review · {active.unavailable} unavailable</p>
       <progress aria-label="Import progress" className="w-full accent-accent" max={Math.max(1, active.total_tracks)} value={active.status === 'ready' ? active.total_tracks : active.processed} />
       {previewDuplicates > 0 && <p>{previewDuplicates} repeated occurrence{previewDuplicates === 1 ? '' : 's'} will be preserved in playlist order.</p>}
-      {active.needs_review + active.unavailable > 0 && <p>Unmatched tracks stay in the playlist. Review a track below to choose its recording.</p>}
+      {active.needs_review + active.unavailable > 0 && <p>Unmatched tracks stay in the playlist. Capsule tries the highest match during playback when candidates are available.</p>}
       {active.playlist_id && ['cancelled', 'interrupted', 'error'].includes(active.status) && <p>Saved tracks are kept. You can resume source checks without importing the playlist again.</p>}
       {preview?.warnings.map((warning, index) => <p key={index} className="text-warn">{warning}</p>)}
       {active.error && <p role="alert" className="text-crit">{active.error}</p>}
@@ -341,7 +341,7 @@ function TrackReview({ trackId, onChanged }: { trackId: string; onChanged: () =>
     finally { if (valid()) setBusy(false) }
   }
   return <div className="mt-3 space-y-2 pl-4">
-    <p>Choose the recording you want. Version mismatches are marked.</p>
+    <p>Capsule tries the highest match when playback needs a fallback. You can choose another recording here. Version mismatches are marked.</p>
     <Action disabled={busy} onClick={() => void run()}>Search again</Action>
     {error && <p role="alert" className="text-crit">{error}</p>}
     {candidates.length === 0 && <p>No playback candidates yet.</p>}

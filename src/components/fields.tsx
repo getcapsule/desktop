@@ -64,7 +64,7 @@ export function Field({
         onKeyDown={(e) => {
           if (e.key === 'Enter' && onEnter) onEnter()
         }}
-        className="mt-1 w-full rounded border border-rule bg-ground px-2.5 py-1.5 text-xs text-ink outline-none placeholder:text-muted focus:border-muted"
+        className="mt-1 w-full rounded border border-rule bg-ground px-2.5 py-1.5 text-xs text-ink placeholder:text-muted"
       />
     </label>
   )

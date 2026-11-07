@@ -3,8 +3,8 @@ import { createPortal } from 'react-dom'
 import type { LocalPlaylist } from '../lib/qol-ipc'
 import { ImportURL } from './ImportURL'
 
-export const playlistField = 'w-full rounded-md border border-rule bg-ground px-3 py-2 text-sm text-ink focus-visible:outline-2 focus-visible:outline-accent'
-export const playlistButton = 'shrink-0 rounded-md border border-rule px-3 py-1.5 text-xs text-ink hover:border-accent focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40'
+export const playlistField = 'w-full rounded-md border border-rule bg-ground px-3 py-2 text-sm text-ink'
+export const playlistButton = 'shrink-0 rounded-md border border-rule px-3 py-1.5 text-xs text-ink hover:border-accent disabled:opacity-40'
 
 export function PlaylistModal({ title, description, busy, onClose, children }: {
   title: string
@@ -116,7 +116,7 @@ export function PlaylistDialog({ description, playlists = [], offerImport = fals
         <>
           {adding && playlists.length > 0 && (
             <form className="flex items-end gap-2" onSubmit={event => { event.preventDefault(); if (playlistId) void save(playlistId, null, close) }}>
-              <label className="min-w-0 flex-1 space-y-1 text-xs text-muted">
+              <label className="grid min-w-0 flex-1 gap-1 text-xs text-muted">
                 <span>Playlist</span>
                 <select value={playlistId} disabled={busy} onChange={event => setPlaylistId(event.target.value)} className={playlistField}>
                   <option value="">Choose a playlist</option>
@@ -127,7 +127,7 @@ export function PlaylistDialog({ description, playlists = [], offerImport = fals
             </form>
           )}
           <form className="flex items-end gap-2" onSubmit={event => { event.preventDefault(); if (name.trim()) void save(null, name.trim(), close) }}>
-            <label className="min-w-0 flex-1 space-y-1 text-xs text-muted">
+            <label className="grid min-w-0 flex-1 gap-1 text-xs text-muted">
               <span>Playlist name</span>
               <input value={name} maxLength={200} disabled={busy} autoFocus={offerImport} onChange={event => setName(event.target.value)} placeholder="Name your playlist" className={playlistField} />
             </label>

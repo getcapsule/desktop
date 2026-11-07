@@ -80,7 +80,7 @@ export function PlaylistEditor({ playlist, onClose }: { playlist: LocalPlaylist;
                 type="file"
                 accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
                 disabled={busy}
-                className="block w-full rounded text-xs text-ink file:mr-2 file:cursor-pointer file:rounded-md file:border file:border-rule file:bg-ground file:px-2 file:py-1 focus-visible:outline-2 focus-visible:outline-accent"
+                className="block w-full rounded text-xs text-ink file:mr-2 file:cursor-pointer file:rounded-md file:border file:border-rule file:bg-ground file:px-2 file:py-1"
                 onChange={event => {
                   const file = event.target.files?.[0]
                   if (!file) return

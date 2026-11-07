@@ -17,7 +17,7 @@ export function LibrarySort<T extends string>({ label, value, options, onChange,
   count: number
   loading: boolean
 }) {
-  const style = 'rounded border border-rule bg-ground px-2 py-1 text-[11px] text-ink outline-none focus:border-accent'
+  const style = 'rounded border border-rule bg-ground px-2 py-1 text-[11px] text-ink'
   return (
     <div className="library-sort flex shrink-0 flex-wrap items-center gap-2">
       <span className="mr-auto text-[11px] text-muted" role="status">{loading ? 'Reading library…' : `${count} ${label}`}</span>
