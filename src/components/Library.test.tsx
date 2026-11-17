@@ -181,6 +181,7 @@ it('imports a playlist from a link without leaving Playlists', async () => {
 })
 
 it('adds a Discover result and an imported playlist song to the same local playlist', async () => {
+  stored.source = 'soundcloud'
   const discovered = { id: '123', title: 'Discovered track', artist: 'Artist', artist_id: null, album: null, duration_ms: 1000, artwork_url: null, permalink_url: null }
   const importedId = '45e8508d-cf1e-42c5-9a0a-83077b41befe'
   const imported = { ...song(importedId, 'Imported track'), catalog_id: importedId }
@@ -200,8 +201,8 @@ it('adds a Discover result and an imported playlist song to the same local playl
     if (command === 'library_playlist_songs') return [imported]
     if (command === 'qol_playlist_add_discovered' || command === 'qol_playlist_add') {
       entries.push(command === 'qol_playlist_add_discovered'
-        ? { song: savedDiscovery, source: 'local', playback_route: route }
-        : { song: imported, source: 'local' })
+        ? { song: savedDiscovery, source: 'soundcloud', playback_route: route }
+        : { song: imported, source: 'soundcloud' })
       boundary.handlers.get('qol://updated')?.({ payload: snapshot() })
       return 'qol:mix'
     }
@@ -211,7 +212,7 @@ it('adds a Discover result and an imported playlist song to the same local playl
   const homepage = await screen.findByRole('button', { name: 'Homepage' })
   expect(screen.getByRole('navigation', { name: 'Main navigation' }).querySelector('button')).toBe(homepage)
   fireEvent.click(homepage)
-  fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'Discovered track' } })
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Search SoundCloud' }), { target: { value: 'Discovered track' } })
   click('Search')
   fireEvent.click(await screen.findByRole('button', { name: 'Add Discovered track to playlist' }))
   fireEvent.change(screen.getByRole('textbox', { name: 'Playlist name' }), { target: { value: 'My mix' } })
@@ -224,14 +225,14 @@ it('adds a Discover result and an imported playlist song to the same local playl
   fireEvent.click(screen.getByRole('menuitem', { name: 'Add to playlist' }))
   fireEvent.change(await screen.findByRole('combobox', { name: 'Playlist' }), { target: { value: 'qol:mix' } })
   click('Add to playlist')
-  await waitFor(() => expect(boundary.invoke).toHaveBeenCalledWith('qol_playlist_add', { songs: [imported], source: 'local', playlistId: 'qol:mix', name: null, context: null }))
+  await waitFor(() => expect(boundary.invoke).toHaveBeenCalledWith('qol_playlist_add', { songs: [imported], source: 'soundcloud', playlistId: 'qol:mix', name: null, context: null }))
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
   click('Back')
   click('My mix')
   expect(await screen.findByText('Imported track')).toBeDefined()
   fireEvent.doubleClick(await screen.findByRole('button', { name: /^Discovered trackA & B/ }))
   await waitFor(() => expect(boundary.invoke).toHaveBeenCalledWith('qol_play', {
-    songs: [savedDiscovery, imported], source: 'local', startIndex: 0, context: null, playbackRoutes: [route, null],
+    songs: [savedDiscovery, imported], source: 'soundcloud', startIndex: 0, context: null, playbackRoutes: [route, null],
   }))
 })
 

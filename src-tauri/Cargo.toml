@@ -30,7 +30,7 @@ keyring = { version = "3" }
 souvlaki = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 sha2 = "0.10"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

@@ -20,10 +20,10 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
   const [draft, setDraft] = useState<Settings | null>(null)
   const [progress, setProgress] = useState<SyncProgress | null>(null)
   const [problem, setProblem] = useState<string | null>(null)
-  const sourceRef = useRef<Settings['source']>('local')
+  const sourceRef = useRef<Settings['source']>('youtube')
   const stepRef = useRef(step)
   stepRef.current = step
-  sourceRef.current = draft?.source ?? 'local'
+  sourceRef.current = draft?.source ?? 'youtube'
   const nd = useNavidromeConnect()
   const { password, setPassword, busy: connecting, error: connectError } = nd
 
@@ -65,7 +65,7 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
     onFinished()
   }
 
-  const source = draft?.source ?? 'local'
+  const source = draft?.source ?? 'youtube'
   const chosen = SOURCES.find((s) => s.id === source)
 
   /// The connect command pings before it stores anything, so a bad password
@@ -138,12 +138,13 @@ export function Onboarding({ onFinished }: { onFinished: () => void }) {
 
             {step === 'source' && (
               <>
-                <Head title="Where does your music live?" sub="Choose a playback source. You can change it later in Settings." />
+                <Head title="Choose your playback source" sub="YouTube Music is the default. You can switch sources anytime in Settings." />
                 <div className="mt-5 grid grid-cols-2 gap-2">
                   {SOURCES.map((s) => (
                     <button
                       key={s.id}
                       onClick={() => edit({ source: s.id })}
+                      aria-pressed={source === s.id}
                       className={`rounded border px-3.5 py-3 text-left transition-colors ${
                         source === s.id
                           ? 'border-accent bg-accent/8'

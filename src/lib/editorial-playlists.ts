@@ -3,7 +3,14 @@ export interface EditorialTrack {
   artist: string
 }
 
-export const editorialPlaylists = [
+interface EditorialPlaylist {
+  id: string
+  name: string
+  description: string
+  tracks: EditorialTrack[]
+}
+
+export const editorialPlaylists: EditorialPlaylist[] = [
   {
     id: 'late-night-rnb',
     name: 'Late Night R&B',
@@ -28,4 +35,52 @@ export const editorialPlaylists = [
       { name: 'Apocalypse', artist: 'Cigarettes After Sex' },
     ],
   },
-] satisfies { id: string; name: string; description: string; tracks: EditorialTrack[] }[]
+  {
+    id: 'dance-floor',
+    name: 'Dance Floor',
+    description: 'Disco, French house, and UK garage.',
+    tracks: [
+      { name: 'Music Sounds Better With You', artist: 'Stardust' },
+      { name: 'Finally', artist: 'CeCe Peniston' },
+      { name: 'Flowers', artist: 'Sweet Female Attitude' },
+      { name: 'Around the World', artist: 'Daft Punk' },
+      { name: 'Lady (Hear Me Tonight)', artist: 'Modjo' },
+    ],
+  },
+  {
+    id: 'piano-and-space',
+    name: 'Piano and Space',
+    description: 'Instrumentals for reading and focus.',
+    tracks: [
+      { name: 'Avril 14th', artist: 'Aphex Twin' },
+      { name: 'Ambre', artist: 'Nils Frahm' },
+      { name: 'We Move Lightly', artist: 'Dustin O’Halloran' },
+      { name: 'First Breath After Coma', artist: 'Explosions in the Sky' },
+      { name: 'Gymnopédie No. 1', artist: 'Erik Satie' },
+    ],
+  },
+  {
+    id: 'anatolian-guitars',
+    name: 'Anatolian Guitars',
+    description: 'Turkish rock and psychedelic folk.',
+    tracks: [
+      { name: 'İnce İnce Bir Kar Yağar', artist: 'Selda Bağcan' },
+      { name: 'Dönence', artist: 'Barış Manço' },
+      { name: 'Resimdeki Gözyaşları', artist: 'Cem Karaca' },
+      { name: 'Fesuphanallah', artist: 'Erkin Koray' },
+      { name: 'Goca Dünya', artist: 'Altın Gün' },
+    ],
+  },
+  {
+    id: 'head-nod',
+    name: 'Head Nod',
+    description: 'Sample-heavy hip-hop across decades.',
+    tracks: [
+      { name: 'Electric Relaxation', artist: 'A Tribe Called Quest' },
+      { name: 'Doomsday', artist: 'MF DOOM' },
+      { name: 'T.R.O.Y.', artist: 'Pete Rock & C.L. Smooth' },
+      { name: 'Feather', artist: 'Nujabes' },
+      { name: 'The World Is Yours', artist: 'Nas' },
+    ],
+  },
+]

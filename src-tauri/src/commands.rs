@@ -105,7 +105,14 @@ fn run_native(
     match action {
         NativeAction::Ignore => {}
         NativeAction::Play => engine.play(),
-        NativeAction::Pause => engine.pause(),
+        NativeAction::Pause => {
+            engine.pause();
+            state
+                .player
+                .lock()
+                .expect("player mutex")
+                .set_status(crate::player::Status::Paused);
+        }
         NativeAction::Seek(ms) => engine.seek(ms),
         NativeAction::Volume(p) => engine.set_volume(p),
         NativeAction::LoadCurrent => {
@@ -163,44 +170,58 @@ pub(crate) fn publish(app: &AppHandle, state: &AppState) {
     crate::media_controls::update(app, &snapshot);
     #[cfg(target_os = "windows")]
     crate::thumbbar::refresh(app, snapshot.status);
-    report_now_playing(app, state, &snapshot);
+    report_now_playing(app, state);
 }
 
-fn report_now_playing(app: &AppHandle, state: &AppState, snapshot: &PlayerState) {
+fn report_now_playing(app: &AppHandle, state: &AppState) {
     use crate::player::Status;
 
-    let track = snapshot.current().cloned();
-    let stopped = matches!(snapshot.status, Status::Idle | Status::Ended) || track.is_none();
-
     let mut last = state.now_reported.lock().expect("now reported mutex");
+    // Read playback under the reporting lock so a delayed publish can't revive a paused track.
+    let (status, track, index, position_ms) = {
+        let player = state.player.lock().expect("player mutex");
+        let current = player.state();
+        (
+            current.status,
+            current.current().cloned(),
+            current.index,
+            current.position_ms,
+        )
+    };
+    let stopped = matches!(status, Status::Idle | Status::Ended) || track.is_none();
+    let playing = status == Status::Playing && track.is_some();
+    if last.discord_playing && !playing {
+        if let Some(presence) = state.discord.lock().expect("discord mutex").as_ref() {
+            presence.clear();
+        }
+    }
+    let resumed = playing && !last.discord_playing;
+    last.discord_playing = playing;
 
     if stopped {
         if last.track_id.is_some() {
             last.track_id = None;
             last.queue_index = None;
             last.scrobbled = false;
-            let presence = state.discord.lock().expect("discord mutex").clone();
-            if let Some(p) = presence {
-                let ticket = p.begin_update();
-                std::thread::spawn(move || p.clear_current(ticket));
-            }
         }
         return;
     }
 
     let Some(track) = track else { return };
     let changed =
-        last.track_id.as_deref() != Some(track.id.as_str()) || last.queue_index != snapshot.index;
+        last.track_id.as_deref() != Some(track.id.as_str()) || last.queue_index != index;
     if changed {
         last.track_id = Some(track.id.clone());
-        last.queue_index = snapshot.index;
+        last.queue_index = index;
         last.scrobbled = false;
-        scrobble(app, &track, snapshot.position_ms, false);
-        present(app, track.clone(), snapshot.status);
+        scrobble(app, &track, position_ms, false);
     }
-    if !last.scrobbled && crate::lastfm::scrobble_due(snapshot.position_ms, track.duration_ms) {
+    if playing && (resumed || changed) {
+        present(app, track.clone());
+    }
+    if !last.scrobbled && crate::lastfm::scrobble_due(position_ms, track.duration_ms) {
         last.scrobbled = true;
-        scrobble(app, &track, snapshot.position_ms, true);
+        scrobble(app, &track, position_ms, true);
     }
 }
 
@@ -260,7 +281,7 @@ fn scrobble(app: &AppHandle, track: &Track, position_ms: u64, submission: bool) 
     });
 }
 
-fn present(app: &AppHandle, track: Track, status: crate::player::Status) {
+fn present(app: &AppHandle, track: Track) {
     let presence = {
         app.state::<AppState>()
             .discord
@@ -317,7 +338,7 @@ fn present(app: &AppHandle, track: Track, status: crate::player::Status) {
                 .and_then(|url| crate::discord::public_artwork_url(&url))
         };
 
-        std::thread::spawn(move || presence.show(ticket, &track, status, image.as_deref()));
+        presence.show(ticket, &track, image.as_deref()).await;
     });
 }
 
@@ -1047,8 +1068,7 @@ pub(crate) fn reconcile_backend(app: &AppHandle, source: crate::settings::Source
     state.player.lock().expect("player mutex").reset_queue();
     *state.now_reported.lock().expect("now reported mutex") = NowReported::default();
     if let Some(presence) = state.discord.lock().expect("discord mutex").clone() {
-        let ticket = presence.begin_update();
-        std::thread::spawn(move || presence.clear_current(ticket));
+        presence.clear();
     }
 
     if source == Source::Youtube {

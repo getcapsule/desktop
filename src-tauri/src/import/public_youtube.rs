@@ -4,6 +4,7 @@ use super::{
     model::*,
     urls::{ContentKind, ImportUrl},
 };
+use crate::soundcloud::{Album, AlbumTracks, Artist, SearchKind, SearchResults, Track};
 use rustypipe::{
     client::RustyPipe,
     model::{Thumbnail, TrackItem, VideoItem},
@@ -339,6 +340,124 @@ fn candidate(track: ImportedTrack) -> PlaybackCandidate {
         confidence: 0.0,
         compatible: true,
     }
+}
+
+fn discovery_track(item: &TrackItem) -> Option<Track> {
+    let track = music_track(item)?;
+    Some(Track {
+        id: track.origin.external_id,
+        title: track.metadata.title,
+        artist: track.metadata.artists.join(", "),
+        artist_id: item.artists.first().and_then(|artist| artist.id.clone()),
+        album: track.metadata.album,
+        duration_ms: track.metadata.duration_ms.unwrap_or_default(),
+        artwork_url: track.metadata.artwork_url,
+        permalink_url: track.origin.url,
+    })
+}
+
+pub(crate) async fn discover_search(kind: SearchKind, term: &str) -> Result<SearchResults, String> {
+    let term = term.trim();
+    if term.is_empty() || term.chars().count() > 512 {
+        return Err("Search query must be between 1 and 512 characters.".into());
+    }
+    let query = client()?.query().unauthenticated();
+    let cancel = Cancellation::default();
+    let mut results = SearchResults::default();
+    match kind {
+        SearchKind::Tracks => {
+            let response = request(&cancel, query.music_search_tracks(term)).await?;
+            results.tracks = response.items.items.iter().filter_map(discovery_track).take(30).collect();
+        }
+        SearchKind::Artists => {
+            let response = request(&cancel, query.music_search_artists(term)).await?;
+            results.artists = response.items.items.into_iter().take(30).map(|item| Artist {
+                id: item.id,
+                name: item.name,
+                artwork_url: thumbnail(&item.avatar),
+                permalink_url: None,
+            }).collect();
+        }
+        SearchKind::Albums => {
+            let response = request(&cancel, query.music_search_albums(term)).await?;
+            results.albums = response.items.items.into_iter().take(30).map(|item| Album {
+                id: item.id,
+                title: item.name,
+                artist: item.artists.into_iter().map(|artist| artist.name).collect::<Vec<_>>().join(", "),
+                artist_id: item.artist_id,
+                artwork_url: thumbnail(&item.cover),
+                permalink_url: None,
+                track_count: 0,
+            }).collect();
+        }
+    }
+    Ok(results)
+}
+
+pub(crate) async fn discover_artist(id: &str) -> Result<Vec<Track>, String> {
+    let query = client()?.query().unauthenticated();
+    let artist = request(&Cancellation::default(), query.music_artist(id, false)).await?;
+    Ok(artist.tracks.iter().filter_map(discovery_track).collect())
+}
+
+pub(crate) async fn discover_album(id: &str) -> Result<AlbumTracks, String> {
+    let query = client()?.query().unauthenticated();
+    let album = request(&Cancellation::default(), query.music_album(id)).await?;
+    let tracks: Vec<_> = album.tracks.iter().filter_map(discovery_track).collect();
+    Ok(AlbumTracks {
+        unavailable_count: album.tracks.len() - tracks.len(),
+        truncated: album.tracks.len() < usize::from(album.track_count),
+        album: Album {
+            id: album.id,
+            title: album.name,
+            artist: album.artists.into_iter().map(|artist| artist.name).collect::<Vec<_>>().join(", "),
+            artist_id: album.artist_id,
+            artwork_url: thumbnail(&album.cover),
+            permalink_url: None,
+            track_count: album.track_count.into(),
+        },
+        tracks,
+    })
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct Charts {
+    quick: Vec<Track>,
+    trending: Vec<Track>,
+}
+
+#[tauri::command]
+pub async fn discover_youtube_charts() -> Result<Charts, String> {
+    use std::time::Instant;
+    static CACHE: tokio::sync::Mutex<Option<(Instant, Charts)>> = tokio::sync::Mutex::const_new(None);
+    let mut cache = CACHE.lock().await;
+    if let Some((_, charts)) = cache.as_ref().filter(|(at, _)| at.elapsed() < Duration::from_secs(900)) {
+        return Ok(charts.clone());
+    }
+
+    let query = client()?.query().unauthenticated();
+    let cancel = Cancellation::default();
+    let result = request(&cancel, query.music_charts(None)).await;
+    let mut quick = Vec::new();
+    let mut trending = Vec::new();
+    if let Ok(result) = result {
+        quick = result.top_tracks.iter().filter_map(discovery_track).take(48).collect();
+        trending = result.trending_tracks.iter().filter_map(discovery_track).take(48).collect();
+    }
+    if quick.is_empty() {
+        match request(&cancel, query.music_new_videos()).await {
+            Ok(items) => quick = items.iter().filter_map(discovery_track).take(48).collect(),
+            Err(error) if trending.is_empty() => {
+                return cache.as_ref().map(|(_, charts)| charts.clone()).ok_or(error);
+            }
+            Err(_) => {}
+        }
+    }
+    let charts = Charts { quick, trending };
+    if !charts.quick.is_empty() || !charts.trending.is_empty() {
+        *cache = Some((Instant::now(), charts.clone()));
+    }
+    Ok(charts)
 }
 
 #[cfg(test)]

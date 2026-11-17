@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discover-youtube-charts"
+description = "Enables the discover_youtube_charts command without any pre-configured scope."
+commands.allow = ["discover_youtube_charts"]
+
+[[permission]]
+identifier = "deny-discover-youtube-charts"
+description = "Denies the discover_youtube_charts command without any pre-configured scope."
+commands.deny = ["discover_youtube_charts"]

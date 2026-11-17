@@ -26,6 +26,7 @@
     "allow-import-retry-playback",
     "allow-soundcloud-play",
     "allow-discover-search",
+    "allow-discover-youtube-charts",
     "allow-discover-artist-tracks",
     "allow-discover-album-tracks",
     "allow-qol-snapshot",

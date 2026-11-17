@@ -1,9 +1,11 @@
-use std::sync::{atomic::{AtomicU64, Ordering}, Mutex};
+use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
 
-use discord_rich_presence::activity::{Activity, Assets, Button, Timestamps};
-use discord_rich_presence::{DiscordIpc, DiscordIpcClient};
+use discord_rich_presence::activity::{Activity, ActivityType, Assets, Button, StatusDisplayType, Timestamps};
+use tokio::sync::Mutex;
 
 use crate::player::{Status, Track};
+
+mod ipc;
 
 const REPO_URL: &str = "https://github.com/yvesdeniz/capsule";
 
@@ -119,7 +121,7 @@ pub fn public_artwork_url(template: &str) -> Option<String> {
 }
 
 pub struct Presence {
-    client: Mutex<Option<DiscordIpcClient>>,
+    client: Mutex<Option<ipc::Client>>,
     app_id: String,
     generation: AtomicU64,
 }
@@ -139,81 +141,69 @@ impl Presence {
         Self { client: Mutex::new(None), app_id, generation: AtomicU64::new(0) }
     }
 
-    fn ensure(&self, guard: &mut Option<DiscordIpcClient>) -> bool {
-        if guard.is_some() {
-            return true;
-        }
-        let mut client = DiscordIpcClient::new(&self.app_id);
-        match client.connect() {
-            Ok(()) => {
-                tracing::info!("discord rich presence connected");
-                *guard = Some(client);
-                true
-            }
-            Err(e) => {
-                tracing::debug!(error = %e, "discord not reachable");
-                false
-            }
-        }
-    }
-
-    pub fn show(&self, ticket: u64, track: &Track, status: Status, image: Option<&str>) {
-        let mut guard = self.client.lock().expect("discord mutex");
+    pub async fn show(&self, ticket: u64, track: &Track, image: Option<&str>) {
+        let mut guard = self.client.lock().await;
         if !self.is_current(ticket) {
             return;
         }
-        if !self.ensure(&mut guard) {
-            return;
+        if guard.is_none() {
+            match ipc::Client::connect(&self.app_id).await {
+                Ok(client) => *guard = Some(client),
+                Err(error) => {
+                    tracing::debug!(%error, "discord not reachable");
+                    return;
+                }
+            }
         }
         let Some(client) = guard.as_mut() else { return };
-
-        let details = pad(&track.title);
-        let state = pad(&track.artist);
-
-        let mut assets = Assets::new();
-        if let Some(url) = image.filter(|url| url.chars().count() <= 300) {
-            assets = assets.large_image(url);
-        }
-        let album = pad(&track.album);
-        if !track.album.trim().is_empty() {
-            assets = assets.large_text(&album);
-        }
-
-        let mut activity = Activity::new()
-            .details(&details)
-            .state(&state)
-            .assets(assets)
-            .buttons(vec![Button::new("Get capsule", REPO_URL)]);
-
-        let started = start_epoch(status, track.duration_ms);
-        if let Some(start) = started {
+        let mut activity = listening_activity(track, image);
+        if let Some(start) = start_epoch(Status::Playing, track.duration_ms) {
             activity = activity.timestamps(Timestamps::new().start(start));
         }
 
         if !self.is_current(ticket) {
             return;
         }
-        if let Err(e) = client.set_activity(activity) {
+        if let Err(e) = client.set_activity(Some(activity)).await {
             tracing::debug!(error = %e, "discord set_activity failed; dropping connection");
             *guard = None;
         }
     }
 
-    pub fn clear(&self) {
-        self.clear_current(self.begin_update());
+    pub fn clear(self: &Arc<Self>) {
+        let ticket = self.begin_update();
+        let presence = Arc::clone(self);
+        tauri::async_runtime::spawn(async move { presence.clear_current(ticket).await });
     }
 
-    pub fn clear_current(&self, ticket: u64) {
-        let mut guard = self.client.lock().expect("discord mutex");
+    async fn clear_current(&self, ticket: u64) {
+        let mut guard = self.client.lock().await;
         if !self.is_current(ticket) {
             return;
         }
-        let Some(client) = guard.as_mut() else { return };
-        if let Err(e) = client.clear_activity() {
-            tracing::debug!(error = %e, "discord clear failed; dropping connection");
-            *guard = None;
+        if let Some(mut client) = guard.take() {
+            if let Err(e) = client.set_activity(None).await {
+                tracing::debug!(error = %e, "discord clear failed; dropping connection");
+            }
         }
     }
+}
+
+fn listening_activity<'a>(track: &Track, image: Option<&'a str>) -> Activity<'a> {
+    let mut assets = Assets::new();
+    if let Some(url) = image.filter(|url| url.chars().count() <= 300) {
+        assets = assets.large_image(url);
+    }
+    if !track.album.trim().is_empty() {
+        assets = assets.large_text(pad(&track.album));
+    }
+    Activity::new()
+        .activity_type(ActivityType::Listening)
+        .status_display_type(StatusDisplayType::Name)
+        .details(pad(&track.title))
+        .state(pad(&track.artist))
+        .assets(assets)
+        .buttons(vec![Button::new("Get capsule", REPO_URL)])
 }
 
 fn pad(s: &str) -> String {
@@ -302,7 +292,7 @@ mod tests {
 
     #[test]
     fn rpc_cover_clear_invalidates_pending_lookup_without_client() {
-        let presence = Presence::new("unused".into());
+        let presence = Arc::new(Presence::new("unused".into()));
         let pending = presence.begin_update();
         presence.clear();
         assert!(!presence.is_current(pending));
@@ -381,5 +371,17 @@ mod tests {
         assert!(start_epoch(Status::Playing, 1000).is_some());
         assert!(start_epoch(Status::Paused, 1000).is_none());
         assert!(start_epoch(Status::Idle, 1000).is_none());
+    }
+
+    #[test]
+    fn presence_uses_the_listening_activity_type() {
+        let track = Track {
+            id: "test".into(), title: "Song".into(), artist: "Artist".into(),
+            album: "Album".into(), duration_ms: 1000, playback_route: None,
+        };
+        let payload = serde_json::to_value(listening_activity(&track, None)).unwrap();
+        assert_eq!(payload["type"], 2);
+        assert_eq!(payload["status_display_type"], 0);
+        assert_eq!(payload["details"], "Song");
     }
 }

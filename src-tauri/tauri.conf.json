@@ -13,7 +13,7 @@
     "withGlobalTauri": false,
     "windows": [],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' http://artwork.localhost artwork:; connect-src 'self' ipc: http://ipc.localhost; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' http://artwork.localhost artwork: https://i.ytimg.com https://i9.ytimg.com https://lh3.googleusercontent.com https://yt3.googleusercontent.com https://yt3.ggpht.com https://i1.sndcdn.com; connect-src 'self' ipc: http://ipc.localhost; media-src 'none'; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'none'"
     }
   },
   "bundle": {

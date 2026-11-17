@@ -805,19 +805,23 @@ pub fn playlist_songs(
 pub struct PlaybackSettings {
     pub youtube_enabled: bool,
     pub priority: Vec<Platform>,
+    pub follows_app_source: bool,
 }
 #[tauri::command]
 pub fn import_playback_settings(app: AppHandle) -> Result<PlaybackSettings, String> {
+    let source = app.state::<crate::AppState>().settings.lock().map_err(err)?.source;
     let state = service(&app)?;
     let db = state.db.lock().map_err(err)?;
+    let priority: Option<Vec<Platform>> = db
+        .meta("import_playback_priority")
+        .map_err(err)?
+        .and_then(|value| serde_json::from_str(&value).ok())
+        .filter(|priority: &Vec<Platform>| !priority.is_empty());
     Ok(PlaybackSettings {
         youtube_enabled: db.meta("youtube_native_enabled").map_err(err)?.as_deref()
             != Some("false"),
-        priority: db
-            .meta("import_playback_priority")
-            .map_err(err)?
-            .and_then(|v| serde_json::from_str(&v).ok())
-            .unwrap_or_else(|| vec![Platform::Local, Platform::Navidrome, Platform::Youtube]),
+        follows_app_source: priority.is_none(),
+        priority: priority.unwrap_or_else(|| super::playback::automatic_priority(source)),
     })
 }
 #[tauri::command]
@@ -827,7 +831,13 @@ pub fn import_set_playback_settings(
     priority: Vec<Platform>,
 ) -> Result<(), String> {
     let required = [Platform::Local, Platform::Navidrome, Platform::Youtube];
-    if priority.len() != 3 || required.iter().any(|p| !priority.contains(p)) {
+    if !priority.is_empty() && (required.iter().any(|p| !priority.contains(p))
+        || match priority.len() {
+            3 => false,
+            4 => !priority.contains(&Platform::Soundcloud),
+            _ => true,
+        })
+    {
         return Err("Choose each supported playback source exactly once.".into());
     }
     let state = service(&app)?;

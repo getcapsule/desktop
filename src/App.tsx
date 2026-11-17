@@ -70,10 +70,10 @@ export default function App() {
   const [query, setQuery] = useState('')
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [onboarding, setOnboarding] = useState<boolean | null>(null)
-  const [source, setSource] = useState<Source>('local')
+  const [source, setSource] = useState<Source>('youtube')
   const [ndStatus, setNdStatus] = useState<NavidromeStatus | null>(null)
   const [detail, setDetail] = useState<LibraryDetail | null>(null)
-  const sourceRef = useRef<Source>('local')
+  const sourceRef = useRef(source)
   sourceRef.current = source
   const lastListRefresh = useRef(0)
   const results = query.trim() !== '' && !detail && view !== 'favorites' && view !== 'history' && view !== 'downloads'
@@ -381,7 +381,7 @@ export default function App() {
             {view === 'downloads' ? (
               <Downloads />
             ) : view === 'discover' && !results ? (
-              <Discover albums={albums} albumsLoading={albumRows.loading} canPlay={canPlay} onPlayed={() => setRevision(value => value + 1)} />
+              <Discover key={source} albums={albums} albumsLoading={albumRows.loading} canPlay={canPlay} onPlayed={() => setRevision(value => value + 1)} />
             ) : view === 'settings' && !results ? (
               <SettingsView focusTrackId={focusTrackId ?? undefined} />
             ) : view === 'queue' && !results ? (

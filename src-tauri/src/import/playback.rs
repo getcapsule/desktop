@@ -24,11 +24,24 @@ pub struct AvailableRoute {
 }
 
 const DEFAULT_PRIORITY: [Platform; 4] = [
+    Platform::Youtube,
     Platform::Local,
     Platform::Navidrome,
-    Platform::Youtube,
     Platform::Soundcloud,
 ];
+
+pub(super) fn automatic_priority(source: crate::settings::Source) -> Vec<Platform> {
+    use crate::settings::Source;
+    let preferred = match source {
+        Source::Local => Platform::Local,
+        Source::Navidrome => Platform::Navidrome,
+        Source::Soundcloud => Platform::Soundcloud,
+        _ => Platform::Youtube,
+    };
+    std::iter::once(preferred)
+        .chain(DEFAULT_PRIORITY.into_iter().filter(|provider| *provider != preferred))
+        .collect()
+}
 
 /// An explicit override is strict: unavailable selections require user action.
 pub fn select_route(
@@ -810,7 +823,8 @@ pub fn dispatch(app: &AppHandle, state: &AppState, commands: &[EngineCommand]) -
         };
     let priority: Vec<Platform> = priority
         .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_else(|| DEFAULT_PRIORITY.to_vec());
+        .filter(|priority: &Vec<Platform>| !priority.is_empty())
+        .unwrap_or_else(|| automatic_priority(state.settings.lock().expect("settings mutex").source));
     let (navidrome, server) = if track
         .origins
         .iter()
@@ -1010,7 +1024,14 @@ pub fn dispatch(app: &AppHandle, state: &AppState, commands: &[EngineCommand]) -
             for command in commands {
                 match command {
                     EngineCommand::Play => engine.play(),
-                    EngineCommand::Pause => engine.pause(),
+                    EngineCommand::Pause => {
+                        engine.pause();
+                        state
+                            .player
+                            .lock()
+                            .expect("player mutex")
+                            .set_status(Status::Paused);
+                    }
                     EngineCommand::Seek { ms } => engine.seek(*ms),
                     EngineCommand::SetVolume { percent } => engine.set_volume(*percent),
                     _ => {}
@@ -1196,7 +1217,8 @@ mod tests {
             route(Platform::Local, true, true),
         ];
         assert_eq!(
-            select_route(&routes, None, &[]).unwrap().provider,
+            select_route(&routes, None, &automatic_priority(crate::settings::Source::Local))
+                .unwrap().provider,
             Platform::Local
         );
         assert_eq!(

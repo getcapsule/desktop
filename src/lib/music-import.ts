@@ -33,7 +33,7 @@ export interface ImportJob {
 }
 export interface PlaylistEntry { entry_id: string; position: number; track: CapsuleTrack; source_preference?: MusicPlatform | null; resolution: 'pending' | 'searching' | 'matched' | 'needs_review' | 'unavailable' | 'error' }
 export interface PlaybackCandidate extends Metadata { provider: MusicPlatform; external_id: string; confidence: number; compatible: boolean }
-export interface ImportPlaybackSettings { youtube_enabled: boolean; priority: MusicPlatform[] }
+export interface ImportPlaybackSettings { youtube_enabled: boolean; priority: MusicPlatform[]; follows_app_source?: boolean }
 
 export const musicImport = {
   detect: (url: string) => invoke<ImportUrl>('import_detect', { url }),

@@ -27,13 +27,15 @@ A desktop music player with a Rust audio core, public streaming sources, and you
 
 Capsule brings local music, self-hosted libraries, and public streaming audio into one player. Import a playlist, browse its songs alongside your library, and play through the native audio engine.
 
+**YouTube Music is the default on first launch.** Switch to SoundCloud, Navidrome, or local files in Settings. Capsule remembers your choice.
+
 **Playback sources and import providers are separate.** A Spotify playlist supplies metadata. Its tracks play through an available local file, Navidrome recording, YouTube recording, or SoundCloud stream.
 
 | Service | Playback | Library / metadata |
 | --- | --- | --- |
 | Local files | Native file playback | Folder scanning and audio tags |
 | Navidrome | Native playback through Subsonic | Connected server library |
-| YouTube / YouTube Music | Public audio streams | Public track, album, and playlist imports |
+| YouTube / YouTube Music | Public audio streams | Song, artist, and album search, public charts, and track, album, and playlist imports |
 | SoundCloud | Public audio streams | Public imports and song, artist, and album search |
 | Spotify | Metadata only | Public track, album, and playlist imports |
 | Apple Music | Metadata only | Public song, album, and playlist imports |
@@ -59,7 +61,9 @@ Measure Capsule together with its WebView processes. The [Windows process sample
 ### Library and discovery
 
 - Songs, albums, artists, playlists, favorites, and listening history.
-- SoundCloud public catalog search for songs, artists, and albums.
+- Public catalog search for songs, artists, and albums on YouTube Music and SoundCloud.
+- Home has mood shortcuts, playable Quick Picks, public YouTube Music trends, and Capsule-curated mixes.
+- Personal recommendations use the library, favorites, and listening history stored on your device.
 - Public URL imports without manually supplying account tokens in the normal workflow.
 - Library views populated from saved imports, with playlist order and repeated entries preserved.
 - Cached search and sorting, local playlists, and local edits to imported collections.
@@ -173,16 +177,21 @@ Tests requiring public services or real audio output are ignored by default. Run
 
 ### First run
 
-1. Choose a playback source in setup or Settings.
-2. For local files, select your music folders. For Navidrome, connect your server.
-3. For public streaming, import a supported URL or search SoundCloud in Discover.
-4. Open a playlist, album, or song and start playback. Use the queue or a track's More menu for listening actions.
+1. Open Home to play YouTube Music picks, browse by mood, or search the public catalog.
+2. To change sources, open **Settings > Source**. Select your music folders for local files or connect your server for Navidrome.
+3. Play a song or use **Play all** to queue a shelf. Use the queue and track menus to manage playback.
 
 Public YouTube and SoundCloud playback does not require an account connection. Private libraries, restricted recordings, and encrypted streams are outside this public playback workflow.
+
+### Privacy
+
+Capsule does not collect app telemetry. Personal recommendations and their cover selection use on-device data. Capsule Picks looks up featured artists in the public YouTube Music catalog on each launch. Public catalog requests, artwork, and playback go to the relevant providers. Last.fm scrobbling and Discord Rich Presence are optional integrations.
 
 ### Import a collection
 
 Open **Settings > Import**, paste a supported public URL, preview the metadata, and save it as a Capsule playlist. Imports persist across restarts and source changes. Incomplete collections or unavailable tracks produce preview warnings.
+
+Imports prefer your selected app source and can try other available recordings. **Settings > Import > Playback sources** lets you set an import-specific order or follow the app source.
 
 Title, artist, version, and duration evidence guide automatic playback matching. A manual recording choice is a fallback when recovery cannot find suitable playable audio.
 
@@ -206,7 +215,7 @@ The data directory contains `config.toml`, library databases, listening state, a
 A minimal configuration:
 
 ```toml
-source = "local" # local | navidrome | youtube | soundcloud
+source = "youtube" # youtube | soundcloud | navidrome | local
 
 [local]
 folders = []

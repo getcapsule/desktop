@@ -29,6 +29,7 @@ fn main() {
             "import_retry_playback",
             "soundcloud_play",
             "discover_search",
+            "discover_youtube_charts",
             "discover_artist_tracks",
             "discover_album_tracks",
             "desktop_snapshot",

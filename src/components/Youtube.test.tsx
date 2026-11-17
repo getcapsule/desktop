@@ -62,7 +62,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 
 it('offers Local files, Navidrome, YouTube Music and SoundCloud as playback sources', () => {
-  expect(SOURCES.map(source => source.id)).toEqual(['local', 'navidrome', 'youtube', 'soundcloud'])
+  expect(SOURCES.map(source => source.id)).toEqual(['youtube', 'soundcloud', 'local', 'navidrome'])
 })
 
 it('shows public playback guidance without cookie or private-account setup', async () => {

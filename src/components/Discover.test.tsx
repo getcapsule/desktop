@@ -1,17 +1,88 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { Discover } from './Discover'
 import { discover, type SearchResults } from '../lib/discover-ipc'
 import { library, type SongRow } from '../lib/ipc'
+import { editorialPlaylists } from '../lib/editorial-playlists'
 import { EMPTY_QOL } from '../lib/qol-ipc'
 import { ListeningContext } from './ListeningTools'
 
-vi.mock('../lib/discover-ipc', () => ({ discover: { search: vi.fn(), artistTracks: vi.fn(), albumTracks: vi.fn(), play: vi.fn() } }))
+vi.mock('../lib/discover-ipc', () => ({ discover: { search: vi.fn(), artistPhoto: vi.fn(async () => null), artistTracks: vi.fn(), albumTracks: vi.fn(), play: vi.fn(), youtubeCharts: vi.fn() } }))
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (id: string) => `http://artwork.localhost/${id}` }))
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.resetAllMocks(); vi.unstubAllGlobals() })
 const track = (id: string) => ({ id, title: id, artist: 'Artist', artist_id: null, album: null, duration_ms: 1000, artwork_url: null, permalink_url: null })
 const result = (title: string): SearchResults => ({ tracks: [track(title)], artists: [], albums: [] })
+
+it('loads curated artist photos once per session and uses cache-only covers for personalized mixes', async () => {
+  const songs = ['First', 'Second', 'Third', 'Fourth'].map((name, index): SongRow => ({
+    id: name, name, artist_name: `Artist ${index}`, album_name: '', duration_ms: 1000,
+    artwork_url: `https://example.invalid/cover-${index}.jpg`, catalog_id: null,
+  }))
+  const played = songs.slice(0, 2).map(song => ({ song, source: 'local' as const }))
+  const favorites = songs.slice(2).map(song => ({ song, source: 'local' as const }))
+  const snapshot = { ...EMPTY_QOL, history: [...played, ...played], favorites }
+  vi.spyOn(library, 'songs').mockResolvedValue(songs)
+  vi.spyOn(library, 'search').mockResolvedValue([])
+  vi.mocked(discover.artistPhoto).mockImplementation(async artist => `https://yt3.googleusercontent.com/${encodeURIComponent(artist)}`)
+  const homepage = <ListeningContext.Provider value={{ source: 'local', snapshot, problem: vi.fn(), artist: vi.fn(), album: vi.fn(), replace: vi.fn() }}><Discover /></ListeningContext.Provider>
+  const { unmount } = render(homepage)
+
+  const personalized = await screen.findByRole('region', { name: 'Made for you' })
+  const curated = screen.getByRole('region', { name: 'Capsule Picks' })
+  const mixes = within(personalized).getAllByRole('button')
+  expect(mixes).toHaveLength(3)
+  for (const mix of mixes) expect(mix.querySelector('img')?.getAttribute('src')).toMatch(/^http:\/\/artwork\.localhost\/.*&cache=only$/)
+
+  const repeat = within(personalized).getByRole('button', { name: 'Open mix On repeat' })
+  const firstCover = repeat.querySelector('img')!
+  const firstUrl = firstCover.getAttribute('src')
+  fireEvent.error(firstCover)
+  const fallbackUrl = repeat.querySelector('img')?.getAttribute('src')
+  expect(fallbackUrl).toMatch(/^http:\/\/artwork\.localhost\/.*&cache=only$/)
+  expect(fallbackUrl).not.toBe(firstUrl)
+
+  await waitFor(() => expect(curated.querySelectorAll('img')).toHaveLength(6))
+  expect(discover.artistPhoto).toHaveBeenCalledTimes(6)
+  for (const [index, [artist]] of vi.mocked(discover.artistPhoto).mock.calls.entries()) {
+    expect(editorialPlaylists[index]?.tracks.some(track => track.artist === artist)).toBe(true)
+  }
+  const covers = [...curated.querySelectorAll('img')].map(image => image.src)
+  expect(new Set(covers).size).toBe(6)
+  unmount()
+  render(homepage)
+  const reopened = screen.getByRole('region', { name: 'Capsule Picks' })
+  await waitFor(() => expect([...reopened.querySelectorAll('img')].map(image => image.src)).toEqual(covers))
+  expect(discover.artistPhoto).toHaveBeenCalledTimes(6)
+})
+
+it('loads public YouTube Music picks and plays the selected chart recording', async () => {
+  const quick = { ...track('chartVideo1'), title: 'First chart song' }
+  const trending = { ...track('chartVideo2'), title: 'Trending chart song' }
+  vi.mocked(discover.youtubeCharts).mockResolvedValue({ quick: [quick], trending: [trending] })
+  vi.spyOn(library, 'songs').mockResolvedValue([])
+  const play = vi.spyOn(library, 'play').mockResolvedValue()
+  render(<ListeningContext.Provider value={{ source: 'youtube', snapshot: EMPTY_QOL, problem: vi.fn(), artist: vi.fn(), album: vi.fn(), replace: vi.fn() }}><Discover /></ListeningContext.Provider>)
+
+  const pick = await screen.findByRole('button', { name: 'Play First chart song' })
+  expect(screen.getByRole('heading', { name: 'Quick picks' })).toBeDefined()
+  expect(screen.getByRole('heading', { name: 'Trending on YouTube Music' })).toBeDefined()
+  expect(discover.search).not.toHaveBeenCalled()
+  fireEvent.click(pick)
+  await waitFor(() => expect(play).toHaveBeenCalledWith([expect.objectContaining({ name: quick.title, catalog_id: quick.id })], 0))
+  vi.mocked(discover.search).mockResolvedValue(result('Focus track'))
+  fireEvent.click(screen.getByRole('button', { name: 'Focus' }))
+  await waitFor(() => expect(discover.search).toHaveBeenCalledWith('tracks', expect.stringContaining('focus'), 0, 'youtube'))
+})
+
+it('keeps public catalog suggestions out of the local files view', async () => {
+  vi.spyOn(library, 'songs').mockResolvedValue([])
+  render(<ListeningContext.Provider value={{ source: 'local', snapshot: EMPTY_QOL, problem: vi.fn(), artist: vi.fn(), album: vi.fn(), replace: vi.fn() }}><Discover /></ListeningContext.Provider>)
+  await screen.findByText('Add music to your library to see picks here.')
+  expect(screen.queryByRole('searchbox')).toBeNull()
+  expect(discover.search).not.toHaveBeenCalled()
+  expect(discover.youtubeCharts).not.toHaveBeenCalled()
+})
 
 it('ignores a stale search response when a newer query finishes first', async () => {
   let finishOld!: (result: SearchResults) => void
@@ -71,7 +142,7 @@ it('opens a recommended album once and plays its cached tracklist in release ord
   expect(readSongs).toHaveBeenCalledWith(expect.any(Number), 0, { artistName: 'Favorite artist' })
   expect(pick.querySelector('img')?.getAttribute('src')).toBe('http://artwork.localhost/release?w=320&cache=only')
   expect(pick.querySelector('img[src*="quality=high"]')).toBeNull()
-  expect(reportVisibility).toBeDefined()
+  await waitFor(() => expect(reportVisibility).toBeDefined())
   await act(async () => reportVisibility?.([{ isIntersecting: true } as IntersectionObserverEntry], {} as IntersectionObserver))
   expect(pick.querySelector('img[src*="quality=high"]')?.getAttribute('src')).toBe('http://artwork.localhost/release?w=320&quality=high')
   expect(discover.search).not.toHaveBeenCalled()
@@ -97,7 +168,7 @@ it('shows a fixed editorial tracklist and searches externally only on request', 
   vi.spyOn(library, 'search').mockImplementation(async title => title === cached.name ? [{ ...cached, id: 'cover', artist_name: 'Another artist' }, cached] : [])
   const play = vi.spyOn(library, 'play').mockResolvedValue()
   vi.mocked(discover.search).mockResolvedValue(result('Good Days'))
-  render(<ListeningContext.Provider value={{ source: 'local', snapshot: EMPTY_QOL, problem: vi.fn(), artist: vi.fn(), album: vi.fn(), replace: vi.fn() }}><Discover /></ListeningContext.Provider>)
+  render(<ListeningContext.Provider value={{ source: 'soundcloud', snapshot: EMPTY_QOL, problem: vi.fn(), artist: vi.fn(), album: vi.fn(), replace: vi.fn() }}><Discover /></ListeningContext.Provider>)
 
   fireEvent.click(await screen.findByRole('button', { name: 'Open playlist Late Night R&B' }))
   const lookup = await screen.findByRole('button', { name: 'Search SoundCloud for Good Days by SZA' })

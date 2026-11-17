@@ -63,12 +63,25 @@ pub enum StreamError {
     Io(#[from] std::io::Error),
 }
 
-pub fn wait_for(shared: &Shared, want: u64, timeout: Duration) -> Result<u64, StreamError> {
+#[cfg(test)]
+fn wait_for(shared: &Shared, want: u64, timeout: Duration) -> Result<u64, StreamError> {
+    wait_for_reader(shared, want, timeout, None)
+}
+
+fn wait_for_reader(
+    shared: &Shared,
+    want: u64,
+    timeout: Duration,
+    reader: Option<&Cancel>,
+) -> Result<u64, StreamError> {
     let (lock, cvar) = &**shared;
     let deadline = Instant::now() + timeout;
     let mut guard = lock.lock().expect("cache state mutex");
 
     loop {
+        if reader.is_some_and(Cancel::stopped) {
+            return Err(StreamError::Io(std::io::ErrorKind::Interrupted.into()));
+        }
         if let Some(e) = guard.error() {
             return Err(StreamError::Fetch(e.to_string()));
         }
@@ -79,14 +92,7 @@ pub fn wait_for(shared: &Shared, want: u64, timeout: Duration) -> Result<u64, St
         if left.is_zero() {
             return Err(StreamError::Timeout);
         }
-        let (g, res) = cvar.wait_timeout(guard, left).expect("cache state mutex");
-        guard = g;
-        if res.timed_out() && guard.available() < want && !guard.is_complete() {
-            if guard.error().is_some() {
-                continue;
-            }
-            return Err(StreamError::Timeout);
-        }
+        (guard, _) = cvar.wait_timeout(guard, left).expect("cache state mutex");
     }
 }
 
@@ -234,7 +240,13 @@ pub fn spawn_fetch(
         }
     }
 
-    File::create(&path)?;
+    {
+        let _write = cancel.write_guard();
+        if cancel.stopped() {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        File::create(&path)?;
+    }
     cancel.watch(&shared);
 
     tauri::async_runtime::spawn(async move {
@@ -243,11 +255,8 @@ pub fn spawn_fetch(
             if let Err(message) = result {
                 shared.0.lock().expect("cache state mutex").fail(message);
                 shared.1.notify_all();
-            } else if !cancel.stopped() {
-                let state = shared.0.lock().expect("cache state mutex");
-                if state.is_complete() {
-                    mark_complete(&path, state.available());
-                }
+            } else {
+                mark_if_complete(&path, &shared, &cancel);
             }
             return;
         }
@@ -277,14 +286,21 @@ pub fn spawn_fetch(
             }
             shared.0.lock().expect("cache state mutex").fail(message);
             shared.1.notify_all();
-        } else if from == 0 && !cancel.stopped() {
-            let state = shared.0.lock().expect("cache state mutex");
-            if state.is_complete() {
-                mark_complete(&path, state.available());
-            }
+        } else if from == 0 {
+            mark_if_complete(&path, &shared, &cancel);
         }
     });
     Ok(())
+}
+
+fn mark_if_complete(path: &Path, shared: &Shared, cancel: &Cancel) {
+    let _write = cancel.write_guard();
+    if !cancel.stopped() {
+        let state = shared.0.lock().expect("cache state mutex");
+        if state.is_complete() {
+            mark_complete(path, state.available());
+        }
+    }
 }
 
 fn soundcloud_http_client() -> Result<&'static reqwest::Client, ()> {
@@ -458,6 +474,7 @@ pub struct StreamingSource {
     pos: u64,
     abandoned: bool,
     cancel: Cancel,
+    shared_fetch: bool,
 }
 
 impl StreamingSource {
@@ -478,7 +495,14 @@ impl StreamingSource {
             pos: 0,
             abandoned: false,
             cancel,
+            shared_fetch: false,
         })
+    }
+
+    pub(crate) fn shared_reader(path: PathBuf, shared: Shared, reader: Cancel) -> std::io::Result<Self> {
+        let mut source = Self::new(path, shared, String::new(), reader)?;
+        source.shared_fetch = true;
+        Ok(source)
     }
 
     pub fn caching_abandoned(&self) -> bool {
@@ -530,7 +554,12 @@ impl Read for StreamingSource {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let local_pos = self.pos.saturating_sub(self.base);
         let want = local_pos + buf.len() as u64;
-        let available = wait_for(&self.shared, want, READ_TIMEOUT).map_err(|e| {
+        let reader = self.shared_fetch.then_some(&self.cancel);
+        let available = wait_for_reader(&self.shared, want, READ_TIMEOUT, reader).map_err(|e| {
+            if matches!(&e, StreamError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted) {
+                // Decoders may retry an interrupted read; this reader is permanently retired.
+                return std::io::Error::other("Playback superseded.");
+            }
             let message = e.to_string();
             self.observer
                 .0
@@ -575,7 +604,7 @@ impl Seek for StreamingSource {
             }
         };
 
-        if target < self.base || target > self.absolute_available() {
+        if !self.shared_fetch && (target < self.base || target > self.absolute_available()) {
             let past_end = total.is_some_and(|t| target >= t);
             if !past_end && !crate::soundcloud::hls::is_manifest_url(&self.url) {
                 self.refetch(target)?;

@@ -10,7 +10,7 @@ mod public_apple;
 pub(crate) mod public_http;
 pub(crate) mod public_soundcloud;
 pub(crate) mod public_spotify;
-mod public_youtube;
+pub(crate) mod public_youtube;
 pub mod urls;
 
 pub use jobs::State;

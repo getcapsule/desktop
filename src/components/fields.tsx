@@ -25,10 +25,10 @@ interface SourceInfo {
 }
 
 export const SOURCES: SourceInfo[] = [
-  { id: 'local', name: 'Local files', blurb: 'Point at a folder on this machine' },
-  { id: 'navidrome', name: 'Navidrome', blurb: 'Connect to your own server' },
   { id: 'youtube', name: 'YouTube Music', blurb: 'Play public tracks and playlists' },
   { id: 'soundcloud', name: 'SoundCloud', blurb: 'Search and play public tracks' },
+  { id: 'local', name: 'Local files', blurb: 'Point at a folder on this machine' },
+  { id: 'navidrome', name: 'Navidrome', blurb: 'Connect to your own server' },
 ]
 
 export const GLASS = [

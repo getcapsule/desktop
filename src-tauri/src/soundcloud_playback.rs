@@ -9,6 +9,26 @@ use crate::{
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 
+fn load_audio(
+    engine: &crate::audio::Engine,
+    stream: crate::soundcloud::Playable,
+    path: std::path::PathBuf,
+    key: crate::audio_queue::Key,
+) -> Result<(), String> {
+    if crate::soundcloud::hls::is_manifest_url(&stream.url) {
+        // The decoder can clamp seeks in fragmented AAC to zero because the
+        // HLS init segment doesn't carry the duration of the whole track.
+        engine.load_gapless(stream.url, path, key);
+        engine.set_gapless_format(key, stream.audio_info);
+    } else {
+        engine
+            .load(stream.url, path)
+            .map_err(|_| "Could not start the SoundCloud audio buffer.")?;
+        engine.set_format(engine.generation(), stream.audio_info);
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct State(Mutex<Control>);
 #[derive(Default)]
@@ -186,11 +206,13 @@ pub fn send(
                     &format!("{}:{}:{}", external_id, stream.quality, generation),
                 );
                 crate::stream::prune(&directory, 128 * 1024 * 1024, Some(&path));
-                engine
-                    .load(stream.url, path)
-                    .map_err(|_| "Could not start the SoundCloud audio buffer.")?;
-                engine.set_format(engine.generation(), stream.audio_info);
-                player.on_now_playing(&track_id, stream.track.duration_ms);
+                let duration_ms = stream.track.duration_ms;
+                let key = crate::audio_queue::Key {
+                    revision,
+                    index: player.state().index.unwrap_or(0),
+                };
+                load_audio(engine, stream, path, key)?;
+                player.on_now_playing(&track_id, duration_ms);
                 engine.set_volume(player.state().volume);
                 if let Some(ms) = control.seek {
                     engine.seek(ms);
@@ -303,6 +325,76 @@ pub(crate) fn save_discovered_track(
 mod tests {
     use super::*;
     use crate::import::playback::{select_recording, AvailableRoute, Route};
+
+    #[test]
+    fn hls_seeks_play_audio_at_the_selected_timestamp_in_both_directions() {
+        use rodio::Source;
+        use std::time::{Duration, Instant};
+
+        let bytes = include_bytes!("../testdata/resume-two-tones-fragmented.m4a");
+        let path = std::env::temp_dir().join(format!("capsule-hls-seek-{}.dat", uuid::Uuid::new_v4()));
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::write(path.with_extension("done"), bytes.len().to_string()).unwrap();
+        let (engine, mut output) = crate::audio::Engine::headless();
+        let key = crate::audio_queue::Key {
+            revision: 1,
+            index: 0,
+        };
+        let stream = crate::soundcloud::Playable {
+            audio_info: crate::audio::AudioInfo {
+                bitrate_kbps: Some(160),
+                ..Default::default()
+            },
+            url: "https://example.sndcdn.com/stream.m3u8".into(),
+            mime_type: "audio/mpegurl".into(),
+            quality: "hq".into(),
+            track: discovered_track("42"),
+        };
+        load_audio(&engine, stream, path.clone(), key).unwrap();
+        engine.play();
+
+        let mut reach = |ms: u64| {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while engine.is_loading() || engine.position_ms().abs_diff(ms) >= 25 {
+                assert!(engine.current_error().is_none(), "{:?}", engine.current_error());
+                assert!(
+                    Instant::now() < deadline,
+                    "target {ms} ms, at {} ms",
+                    engine.position_ms()
+                );
+                for _ in 0..128 {
+                    output.next();
+                }
+                std::thread::sleep(Duration::from_millis(3));
+            }
+            let channels = usize::from(output.channels());
+            let count = output.sample_rate() as usize * channels / 10;
+            let samples: Vec<_> = output.by_ref().take(count).step_by(channels).collect();
+            samples
+                .windows(2)
+                .filter(|s| s[0] <= 0.0 && s[1] > 0.0)
+                .count()
+        };
+        assert!((40..50).contains(&reach(50)));
+        engine.seek(2500);
+        let forward = reach(2500);
+        assert!(
+            (80..95).contains(&forward),
+            "expected the second tone, got {forward} crossings"
+        );
+        engine.seek(500);
+        let backward = reach(500);
+        assert!(
+            (40..50).contains(&backward),
+            "expected the first tone, got {backward} crossings"
+        );
+        assert_eq!(engine.audio_info().bitrate_kbps, Some(160));
+        assert_eq!(engine.gapless_snapshot().unwrap().key, Some(key));
+        engine.stop();
+        drop(output);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(path.with_extension("done")).unwrap();
+    }
 
     fn discovered_track(id: &str) -> crate::soundcloud::Track {
         crate::soundcloud::Track {

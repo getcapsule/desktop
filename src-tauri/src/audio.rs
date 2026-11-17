@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::stream::{self, CacheState, Shared, StreamingSource};
@@ -111,16 +111,40 @@ enum LoadedSource {
 
 struct PcmTransfer {
     cancel: stream::Cancel,
-    shared: Option<Shared>,
+    stream: Option<Arc<PcmStream>>,
     space: Arc<(Mutex<()>, Condvar)>,
     info: Arc<Mutex<AudioInfo>>,
 }
 
 impl PcmTransfer {
     fn stop(&self) {
+        if let Some(stream) = &self.stream {
+            stream.cancel.stop();
+        }
+        self.cancel_decoder();
+    }
+
+    fn cancel_decoder(&self) {
         self.cancel.stop();
+        if let Some(stream) = &self.stream {
+            let _state = stream.shared.0.lock().expect("cache state mutex");
+            stream.shared.1.notify_all();
+        }
         let _capacity = self.space.0.lock().expect("PCM capacity");
         self.space.1.notify_all();
+    }
+}
+
+#[derive(Default)]
+struct PcmStream {
+    cancel: stream::Cancel,
+    shared: Shared,
+    started: OnceLock<Result<(), String>>,
+}
+
+impl Drop for PcmStream {
+    fn drop(&mut self) {
+        self.cancel.stop();
     }
 }
 
@@ -131,16 +155,27 @@ fn prepare_pcm(
     source: LoadedSource,
     offset_ms: u64,
 ) -> PcmTransfer {
+    let stream =
+        matches!(source, LoadedSource::Stream { .. }).then(|| Arc::new(PcmStream::default()));
+    prepare_pcm_with_stream(pipeline, ticket, source, offset_ms, stream)
+}
+
+fn prepare_pcm_with_stream(
+    pipeline: Arc<crate::audio_queue::Pipeline>,
+    ticket: crate::audio_queue::Ticket,
+    source: LoadedSource,
+    offset_ms: u64,
+    stream: Option<Arc<PcmStream>>,
+) -> PcmTransfer {
     use crate::audio_queue::{Chunk, Prepared, CHANNELS, RATE};
     use rodio::Source;
     let cancel = stream::Cancel::default();
-    let shared = matches!(source, LoadedSource::Stream { .. })
-        .then(|| Arc::new((Mutex::new(CacheState::new()), Condvar::new())));
+    let shared = stream.as_ref().map(|stream| stream.shared.clone());
     let space = Arc::new((Mutex::new(()), Condvar::new()));
     let info = Arc::new(Mutex::new(AudioInfo::default()));
     let work = PcmTransfer {
         cancel: cancel.clone(),
-        shared: shared.clone(),
+        stream: stream.clone(),
         space: space.clone(),
         info: info.clone(),
     };
@@ -159,17 +194,23 @@ fn prepare_pcm(
                     .map_err(|_| "Could not decode the audio file.")?,
                 ),
                 LoadedSource::Stream { url, cache } => {
-                    let shared = shared.as_ref().unwrap().clone();
-                    stream::spawn_fetch(
-                        url.clone(),
-                        cache.clone(),
-                        shared.clone(),
-                        0,
-                        cancel.clone(),
-                    )
-                    .map_err(|_| "Could not start the native audio buffer.")?;
-                    let source = StreamingSource::new(cache, shared, url, cancel.clone())
-                        .map_err(|_| "Could not open the native audio buffer.")?;
+                    let stream = stream.as_ref().expect("PCM stream");
+                    stream
+                        .started
+                        .get_or_init(|| {
+                            stream::spawn_fetch(
+                                url,
+                                cache.clone(),
+                                stream.shared.clone(),
+                                0,
+                                stream.cancel.clone(),
+                            )
+                            .map_err(|_| "Could not start the native audio buffer.".into())
+                        })
+                        .clone()?;
+                    let source =
+                        StreamingSource::shared_reader(cache, stream.shared.clone(), cancel.clone())
+                            .map_err(|_| "Could not open the native audio buffer.")?;
                     Box::new(
                         rodio::Decoder::new(source)
                             .map_err(|_| "Could not decode the audio stream.")?,
@@ -311,6 +352,41 @@ struct Gapless {
     slots: Vec<PcmSlot>,
 }
 
+impl Gapless {
+    fn selected_slot(&self) -> Option<&PcmSlot> {
+        match self.pipeline.snapshot().key {
+            Some(key) => self.slots.iter().find(|slot| slot.ticket.key == key),
+            None => self.slots.first(),
+        }
+    }
+
+    fn seek(&mut self, ms: u64) {
+        let Some(slot) = self.selected_slot() else {
+            return;
+        };
+        let key = slot.ticket.key;
+        let source = slot.source.clone();
+        let stream = slot.work.stream.clone();
+        let format = slot.work.info.lock().expect("audio format").clone();
+        let ticket = self.pipeline.begin(key);
+        for slot in self.slots.drain(..) {
+            if slot.ticket.key == key {
+                slot.work.cancel_decoder();
+            } else {
+                slot.work.stop();
+            }
+        }
+        // Keep the active download and its buffered prefix while replacing the decoder.
+        let work = prepare_pcm_with_stream(self.pipeline.clone(), ticket, source.clone(), ms, stream);
+        work.info.lock().expect("audio format").merge_hint(format);
+        self.slots.push(PcmSlot {
+            ticket,
+            source,
+            work,
+        });
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
     #[error("no audio output device available: {0}")]
@@ -349,7 +425,7 @@ impl Drop for ClearOnDrop {
 }
 
 pub struct Engine {
-    _stream: rodio::OutputStream,
+    _stream: Option<rodio::OutputStream>,
     sink: Arc<rodio::Sink>,
     current: Mutex<Option<Shared>>,
     loading: Arc<AtomicU64>,
@@ -384,6 +460,16 @@ impl Engine {
         }
         .map_err(|e| AudioError::Device(e.to_string()))?;
         let sink = Arc::new(rodio::Sink::connect_new(stream.mixer()));
+        Ok(Self::with_sink(sink, Some(stream)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn headless() -> (Self, rodio::queue::SourcesQueueOutput) {
+        let (sink, output) = rodio::Sink::new();
+        (Self::with_sink(Arc::new(sink), None), output)
+    }
+
+    fn with_sink(sink: Arc<rodio::Sink>, stream: Option<rodio::OutputStream>) -> Self {
         let loading = Arc::new(AtomicU64::new(0));
         let pending_seek = Arc::new(Mutex::new(None));
         let lifecycle = Arc::new(Mutex::new(()));
@@ -412,7 +498,7 @@ impl Engine {
         };
         static NEXT_ENGINE: AtomicU64 = AtomicU64::new(1);
         let initial_generation = NEXT_ENGINE.fetch_add(1, Ordering::SeqCst) << 32;
-        Ok(Self {
+        Self {
             _stream: stream,
             sink,
             current: Mutex::new(None),
@@ -426,7 +512,7 @@ impl Engine {
             shutdown,
             source: Mutex::new(None),
             gapless: Mutex::new(None),
-        })
+        }
     }
 
     pub fn load_gapless(&self, url: String, cache: PathBuf, key: crate::audio_queue::Key) {
@@ -500,11 +586,8 @@ impl Engine {
         let _lifecycle = self.lifecycle.lock().expect("audio lifecycle");
         let guard = self.gapless.lock().expect("gapless audio");
         let mut info = if let Some(gapless) = guard.as_ref() {
-            let key = gapless.pipeline.snapshot().key;
             gapless
-                .slots
-                .iter()
-                .find(|slot| Some(slot.ticket.key) == key)
+                .selected_slot()
                 .map(|slot| slot.work.info.lock().expect("audio format").clone())
                 .unwrap_or_default()
         } else {
@@ -717,29 +800,7 @@ impl Engine {
         {
             let mut guard = self.gapless.lock().expect("gapless audio");
             if let Some(gapless) = guard.as_mut() {
-                let key = gapless
-                    .pipeline
-                    .snapshot()
-                    .key
-                    .or_else(|| gapless.slots.first().map(|s| s.ticket.key));
-                if let Some((key, source)) = key.and_then(|key| {
-                    gapless
-                        .slots
-                        .iter()
-                        .find(|s| s.ticket.key == key)
-                        .map(|s| (key, s.source.clone()))
-                }) {
-                    let ticket = gapless.pipeline.begin(key);
-                    for slot in gapless.slots.drain(..) {
-                        slot.work.stop();
-                    }
-                    let work = prepare_pcm(gapless.pipeline.clone(), ticket, source.clone(), ms);
-                    gapless.slots.push(PcmSlot {
-                        ticket,
-                        source,
-                        work,
-                    });
-                }
+                gapless.seek(ms);
                 return;
             }
         }
@@ -805,8 +866,17 @@ impl Engine {
         paused: bool,
         volume: u8,
     ) -> Result<(), AudioError> {
-        let source = self.source.lock().expect("audio source").clone();
-        let key = self.gapless_snapshot().and_then(|snapshot| snapshot.key);
+        let selected = self
+            .gapless
+            .lock()
+            .expect("gapless audio")
+            .as_ref()
+            .and_then(Gapless::selected_slot)
+            .map(|slot| (slot.source.clone(), slot.ticket.key));
+        let (source, key) = match selected {
+            Some((source, key)) => (Some(source), Some(key)),
+            None => (self.source.lock().expect("audio source").clone(), None),
+        };
         if let Some(LoadedSource::File(path)) = &source {
             std::fs::File::open(path)?;
         }
@@ -877,8 +947,8 @@ impl Engine {
             return guard
                 .as_ref()
                 .and_then(|g| g.slots.iter().find(|s| Some(s.ticket.key) == snapshot.key))
-                .and_then(|s| s.work.shared.as_ref())
-                .and_then(|s| s.0.lock().ok()?.error().map(str::to_owned));
+                .and_then(|s| s.work.stream.as_ref())
+                .and_then(|s| s.shared.0.lock().ok()?.error().map(str::to_owned));
         }
         let guard = self.current.lock().expect("current mutex");
         let shared = guard.as_ref()?;
@@ -1080,6 +1150,77 @@ mod tests {
             check_restored_aac_pcm(name, bytes, false);
             check_restored_aac_pcm(name, bytes, true);
         }
+    }
+
+    #[test]
+    fn seeks_reuse_the_unfinished_download_and_play_the_requested_audio() {
+        use crate::audio_queue::{Key, Pipeline};
+        use std::io::Write;
+
+        let bytes = include_bytes!("../testdata/resume-two-tones-fragmented.m4a");
+        let (prefix, rest) = bytes.split_at(bytes.len() / 2);
+        let cache = std::env::temp_dir().join(format!("capsule-seek-{}.dat", uuid::Uuid::new_v4()));
+        let mut writer = std::fs::File::create(&cache).unwrap();
+        writer.write_all(prefix).unwrap();
+
+        let stream = Arc::new(PcmStream::default());
+        stream.started.set(Ok(())).unwrap();
+        {
+            let mut state = stream.shared.0.lock().unwrap();
+            state.set_total(Some(bytes.len() as u64));
+            state.note_written(prefix.len() as u64);
+        }
+        let source = LoadedSource::Stream {
+            url: "http://127.0.0.1:9/expired-stream".into(),
+            cache: cache.clone(),
+        };
+        let (pipeline, mut output) = Pipeline::new();
+        let key = Key {
+            revision: 1,
+            index: 0,
+        };
+        let initial = pipeline.begin(key);
+        let work = prepare_pcm_with_stream(
+            pipeline.clone(),
+            initial,
+            source.clone(),
+            0,
+            Some(stream.clone()),
+        );
+        let mut gapless = Gapless {
+            pipeline: pipeline.clone(),
+            slots: vec![PcmSlot {
+                ticket: initial,
+                source,
+                work,
+            }],
+        };
+        gapless.seek(2500);
+
+        writer.write_all(rest).unwrap();
+        drop(writer);
+        stream.shared.0.lock().unwrap().note_written(rest.len() as u64);
+        stream.shared.1.notify_all();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while pipeline.snapshot().key.is_none() && std::time::Instant::now() < deadline {
+            output.next();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let state = pipeline.snapshot();
+        assert!(state.error.is_none(), "{:?}", state.error);
+        assert_eq!(state.key, Some(key));
+        assert!((2500..2510).contains(&state.position_ms));
+        let samples: Vec<_> = output.by_ref().take(9600).step_by(2).collect();
+        let crossings = samples.windows(2).filter(|s| s[0] <= 0.0 && s[1] > 0.0).count();
+        assert!(
+            (75..100).contains(&crossings),
+            "expected 880 Hz at 2.5s, got {crossings} crossings"
+        );
+        pipeline.stop();
+        gapless.slots[0].work.stop();
+        assert_eq!(std::fs::read(&cache).unwrap(), bytes);
+        std::fs::remove_file(cache).unwrap();
     }
 
     fn check_restored_aac_pcm(name: &str, bytes: &[u8], streamed: bool) {

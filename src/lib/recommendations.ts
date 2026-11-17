@@ -99,3 +99,15 @@ export function repeatedSongs(songs: SongRow[], history: SongEntry[]) {
     return count > 1 && song ? [song] : []
   }).slice(0, 12)
 }
+
+export function rediscoverSongs(songs: SongRow[], history: SongEntry[], favorites: SongEntry[]) {
+  const available = new Map(songs.map(song => [trackKey(song), song]))
+  const recent = new Set(history.slice(0, 20).map(({ song }) => trackKey(song)))
+  const picks = new Map<string, SongRow>()
+  for (const { song } of [...favorites, ...history.slice(20).reverse()]) {
+    const key = trackKey(song)
+    const cached = available.get(key)
+    if (cached && !recent.has(key)) picks.set(key, cached)
+  }
+  return recommendSongs([...picks.values()], listeningTaste([], []))
+}

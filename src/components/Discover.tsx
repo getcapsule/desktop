@@ -3,11 +3,12 @@ import { DownloadButton } from './Downloads'
 import { NavigationIcon } from './icons'
 import { ListeningContext } from './ListeningTools'
 import { PlaylistDialog } from './PlaylistDialog'
-import { discover, type DiscoverAlbum, type DiscoverArtist, type DiscoverTrack, type SearchKind, type SearchResults } from '../lib/discover-ipc'
-import { qol } from '../lib/qol-ipc'
-import { artworkUrl, formatTime, library, type AlbumRow, type SongRow } from '../lib/ipc'
-import { listeningTaste, recommendReleases, recommendSongs, repeatedSongs } from '../lib/recommendations'
+import { discover, type DiscoverAlbum, type DiscoverArtist, type DiscoverTrack, type SearchKind, type SearchResults, type YoutubeCharts } from '../lib/discover-ipc'
+import { qol, type SongEntry } from '../lib/qol-ipc'
+import { artworkUrl, formatTime, library, type AlbumRow, type SongRow, type Source } from '../lib/ipc'
+import { listeningTaste, recommendReleases, recommendSongs, rediscoverSongs, repeatedSongs } from '../lib/recommendations'
 import { editorialPlaylists, type EditorialTrack } from '../lib/editorial-playlists'
+import { playlistCoverArtists, rotateCoverCandidates } from '../lib/cover-session'
 
 const EMPTY: SearchResults = { tracks: [], artists: [], albums: [] }
 const button = 'rounded border border-rule px-3 py-1.5 text-xs transition-colors hover:border-muted disabled:opacity-40'
@@ -16,6 +17,13 @@ const cardClass = 'flex min-w-0 flex-col gap-2 rounded-lg border border-rule bg-
 const rowClass = 'row flex min-h-12 items-center gap-3 rounded px-2 py-1'
 const layoutKey = 'capsule-homepage-layout'
 const noAlbums: AlbumRow[] = []
+const noEntries: SongEntry[] = []
+const moods = [
+  ['Relax', 'chill downtempo songs'], ['Energize', 'upbeat dance songs'], ['Feel good', 'feel good pop songs'],
+  ['Commute', 'road trip songs'], ['Romance', 'soul love songs'], ['Party', 'party house songs'],
+  ['Sad', 'melancholy songs'], ['Sleep', 'ambient sleep music'], ['Workout', 'workout hip hop songs'], ['Focus', 'instrumental focus music'],
+] as const
+const sourceName: Record<Source, string> = { youtube: 'YouTube Music', soundcloud: 'SoundCloud', local: 'Local files', navidrome: 'Navidrome' }
 type Detail = { kind: 'artist' | 'album'; id: string; title: string }
 type Layout = 'list' | 'grid'
 
@@ -23,6 +31,11 @@ export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, on
   albums?: AlbumRow[]; albumsLoading?: boolean; canPlay?: (song: SongRow) => boolean; onPlayed?: () => void
 } = {}) {
   const listening = useContext(ListeningContext)
+  const source = listening?.source ?? 'soundcloud'
+  const isYoutube = source === 'youtube'
+  const isSoundcloud = source === 'soundcloud'
+  const isOnline = isYoutube || isSoundcloud
+  const searchLabel = `Search ${sourceName[source]}`
   const [playlistTrack, setPlaylistTrack] = useState<DiscoverTrack | null>(null)
   const [query, setQuery] = useState('')
   const [submitted, setSubmitted] = useState('')
@@ -56,7 +69,7 @@ export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, on
     setResults(EMPTY)
     if (!term) return
     try {
-      const found = await discover.search(nextKind, term, pageOffset)
+      const found = isYoutube ? await discover.search(nextKind, term, pageOffset, 'youtube') : await discover.search(nextKind, term, pageOffset)
       if (generation.current === request) setResults(found)
     } catch (error) {
       if (generation.current === request) setProblem(String(error))
@@ -71,12 +84,12 @@ export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, on
     setDetailOffset(pageOffset); setDetailTracks([]); setProblem(null); setNotice(''); setLoading(true)
     try {
       if (type === 'album') {
-        const found = await discover.albumTracks(item.id)
+        const found = isYoutube ? await discover.albumTracks(item.id, 'youtube') : await discover.albumTracks(item.id)
         if (generation.current !== request) return
         setDetailTracks(found.tracks)
         setNotice([found.unavailable_count ? `${found.unavailable_count} unavailable tracks omitted.` : '', found.truncated ? 'This album is larger than the available track list.' : ''].filter(Boolean).join(' '))
       } else {
-        const tracks = await discover.artistTracks(item.id, pageOffset)
+        const tracks = isYoutube ? await discover.artistTracks(item.id, pageOffset, 'youtube') : await discover.artistTracks(item.id, pageOffset)
         if (generation.current === request) setDetailTracks(tracks)
       }
     } catch (error) {
@@ -87,9 +100,13 @@ export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, on
   }
 
   const tracks = detail ? detailTracks : results.tracks
-  async function play(index: number) {
+  async function play(index: number, queue = tracks) {
     setPlaying(true); setProblem(null)
-    try { await discover.play(tracks, index); onPlayed?.() }
+    try {
+      if (isYoutube) await library.play(queue.map(youtubeSong), index)
+      else await discover.play(queue, index)
+      onPlayed?.()
+    }
     catch (error) { setProblem(String(error)) }
     finally { setPlaying(false) }
   }
@@ -100,13 +117,13 @@ export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, on
   const showPicks = !submitted && !detail
   const grid = layout === 'grid'
   const pageOffset = detail ? detailOffset : offset
-  const canPage = !detail || detail.kind === 'artist'
+  const canPage = isSoundcloud && (!detail || detail.kind === 'artist')
   function page(next: number) {
     if (detail) void open({ id: detail.id, name: detail.title, artwork_url: null, permalink_url: null }, 'artist', next)
     else void search(kind, next, submitted)
   }
-  return <section className="flex h-full min-h-0 flex-col" aria-label="Homepage">
-    <header className="shrink-0 border-b border-rule px-4 py-4">
+  return <section className={`flex h-full min-h-0 flex-col ${showPicks ? 'bg-[radial-gradient(ellipse_at_top_left,color-mix(in_srgb,var(--color-accent)_8%,transparent),transparent_64%)]' : ''}`} aria-label="Homepage">
+    <header className="shrink-0 border-b border-rule px-4 py-4 sm:px-6">
       <div className="mb-3 flex items-center justify-between gap-3">
         <h1 className="text-base font-semibold">Homepage</h1>
         <div className="flex gap-1 rounded-md border border-rule p-0.5" role="group" aria-label="Homepage layout">
@@ -117,32 +134,33 @@ export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, on
           >{value === 'list' ? 'List' : 'Grid'}</button>)}
         </div>
       </div>
-      <form role="search" onSubmit={event => { event.preventDefault(); void search() }} className="flex gap-2">
-        <input type="search" aria-label="Search SoundCloud" placeholder="Search SoundCloud for songs, artists, or albums…" value={query} maxLength={512} onChange={event => setQuery(event.target.value)} className="min-w-0 flex-1 rounded border border-rule bg-ground px-3 py-2 text-sm" />
+      {isOnline && <form role="search" onSubmit={event => { event.preventDefault(); void search() }} className="flex gap-2">
+        <input type="search" aria-label={searchLabel} placeholder={`${searchLabel} for songs, artists, or albums`} value={query} maxLength={512} onChange={event => setQuery(event.target.value)} className="min-w-0 flex-1 rounded border border-rule bg-ground px-3 py-2 text-sm" />
         <button type="submit" className={button}>Search</button>
-      </form>
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+      </form>}
+      {submitted && <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-1" role="group" aria-label="Search category">
           {(['tracks', 'artists', 'albums'] as const).map(value => <button key={value} aria-pressed={kind === value} className={`rounded px-3 py-1 text-xs ${kind === value ? 'bg-panel text-ink' : 'text-muted hover:text-ink'}`} onClick={() => { setKind(value); void search(value) }}>{value === 'tracks' ? 'Songs' : value === 'artists' ? 'Artists' : 'Albums'}</button>)}
         </div>
-        {submitted && <button className={button} onClick={() => { setQuery(''); void search(kind, 0, '') }}>Back to picks</button>}
-      </div>
+        <button className={button} onClick={() => { setQuery(''); void search(kind, 0, '') }}>Back to picks</button>
+      </div>}
     </header>
     {problem && <p role="alert" className="border-b border-rule px-4 py-3 text-xs text-crit">{problem}</p>}
     {detail && <div className="flex shrink-0 items-center gap-3 border-b border-rule px-4 py-3">
       <button className={button} onClick={back}>Back to results</button>
       <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{detail.title}</h2>
       <button className={button} disabled={loading || playing || !tracks.length} onClick={() => void play(0)}>{playing ? 'Starting…' : 'Play all'}</button>
-      <DownloadButton label="Download all" disabled={loading} requests={tracks.map(track => ({ kind: 'soundcloud', track }))} onProblem={setProblem} />
+      {isSoundcloud && <DownloadButton label="Download all" disabled={loading} requests={tracks.map(track => ({ kind: 'soundcloud', track }))} onProblem={setProblem} />}
     </div>}
     {notice && <p className="px-4 pt-3 text-xs text-muted">{notice}</p>}
     {!showPicks && <div role="status" aria-live="polite" className="shrink-0 px-4 py-2 font-mono text-[10px] text-muted">
-      {loading ? 'Searching SoundCloud…' : count ? `${pageOffset + 1}–${pageOffset + count}${detail?.kind === 'album' ? ' tracks' : ' results'}` : 'No results'}
+      {loading ? `Searching ${sourceName[source]}.` : count ? `${pageOffset + 1}-${pageOffset + count}${detail?.kind === 'album' ? ' tracks' : ' results'}` : 'No results'}
     </div>}
-    <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4" aria-busy={loading}>
+    <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6 sm:px-6" aria-busy={loading}>
       {showPicks ? <HomepagePicks
         key={`${listening?.source}:${listening?.context ?? ''}`}
         grid={grid} albums={albums} albumsLoading={albumsLoading} canPlay={canPlay} onProblem={setProblem}
+        searchLabel={searchLabel} onlinePlaying={playing} onOnlinePlay={(queue, index) => void play(index, queue)}
         onSearch={term => { setKind('tracks'); setQuery(term); void search('tracks', 0, term) }}
       /> : <div className={grid ? gridClass : undefined}>
         {!loading && (detail || kind === 'tracks') && tracks.map((track, index) => <div key={`${track.id}-${index}`} className={grid ? cardClass : rowClass}>
@@ -151,8 +169,8 @@ export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, on
           <span className="font-mono text-[10px] text-muted">{formatTime(track.duration_ms)}</span>
           <div className="flex flex-wrap items-center gap-1.5">
             <button aria-label={`Play ${track.title}`} className={button} disabled={playing} onClick={() => void play(index)}>Play</button>
-            {listening && <button aria-label={`Add ${track.title} to playlist`} aria-haspopup="dialog" className={button} onClick={() => setPlaylistTrack(track)}>Add to playlist</button>}
-            <DownloadButton requests={[{ kind: 'soundcloud', track }]} onProblem={setProblem} />
+            {isSoundcloud && listening && <button aria-label={`Add ${track.title} to playlist`} aria-haspopup="dialog" className={button} onClick={() => setPlaylistTrack(track)}>Add to playlist</button>}
+            {isSoundcloud && <DownloadButton requests={[{ kind: 'soundcloud', track }]} onProblem={setProblem} />}
           </div>
         </div>)}
         {!loading && !detail && kind === 'artists' && results.artists.map(artist => <button
@@ -169,7 +187,7 @@ export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, on
         >
           <Artwork url={album.artwork_url} grid={grid} />
           <TrackLabel title={album.title} artist={album.artist} />
-          <span className="text-xs text-muted">{album.track_count} tracks</span>
+          {album.track_count > 0 && <span className="text-xs text-muted">{album.track_count} tracks</span>}
         </button>)}
       </div>}
     </div>
@@ -186,23 +204,57 @@ export function Discover({ albums = noAlbums, albumsLoading = false, canPlay, on
   </section>
 }
 
+function youtubeSong(track: DiscoverTrack): SongRow {
+  return { id: track.id, catalog_id: track.id, name: track.title, artist_name: track.artist, album_name: track.album ?? '', duration_ms: track.duration_ms, artwork_url: track.artwork_url }
+}
+
 type HomeCollection = {
-  id: string; name: string; description: string; cover?: string | null; coverUpgrade?: string
+  id: string; name: string; description: string; cover?: string | null; coverUpgrade?: string; alternateCovers?: string[]
 } & (
   | { kind: 'album'; albumId: string }
   | { kind: 'track' | 'mix'; songs: SongRow[] }
   | { kind: 'playlist'; tracks: EditorialTrack[] }
 )
 type CollectionTrack = EditorialTrack & { song?: SongRow }
-const capsulePicks: HomeCollection[] = editorialPlaylists.map(playlist => ({ ...playlist, kind: 'playlist' }))
+const editorialCoverRequests = new Map<string, Promise<string | null>>()
 
-function HomepagePicks({ grid, albums, albumsLoading, canPlay, onProblem, onSearch }: {
+function editorialCover(id: string, tracks: EditorialTrack[]) {
+  const pending = editorialCoverRequests.get(id)
+  if (pending) return pending
+
+  const artists = playlistCoverArtists(id, [...new Set(tracks.map(track => track.artist))])
+  const request = (async () => {
+    for (const artist of artists.slice(0, 2)) {
+      const photo = await discover.artistPhoto(artist).catch(() => null)
+      if (photo) return photo
+    }
+    return null
+  })()
+  editorialCoverRequests.set(id, request)
+  return request
+}
+
+function mixCovers(songs: SongRow[], albums: AlbumRow[], size: number, revision?: number) {
+  const candidates = new Map<string, string>()
+  for (const song of songs) {
+    const album = albums.find(album => album.name === song.album_name && album.artist_name === song.artist_name && album.artwork_url)
+    if (album?.artwork_url && !candidates.has(album.artwork_url)) candidates.set(album.artwork_url, album.id)
+    if (song.artwork_url && !candidates.has(song.artwork_url)) candidates.set(song.artwork_url, song.id)
+  }
+  return rotateCoverCandidates([...candidates.values()]).slice(0, 6)
+    .map(id => `${artworkUrl(id, size, revision)}&cache=only`)
+}
+
+function HomepagePicks({ grid, albums, albumsLoading, canPlay, onProblem, onSearch, searchLabel, onlinePlaying, onOnlinePlay }: {
   grid: boolean; albums: AlbumRow[]; albumsLoading: boolean; canPlay?: (song: SongRow) => boolean
   onProblem: (message: string | null) => void; onSearch: (term: string) => void
+  searchLabel: string; onlinePlaying: boolean; onOnlinePlay: (queue: DiscoverTrack[], index: number) => void
 }) {
   const listening = useContext(ListeningContext)
   const snapshot = listening?.snapshot
-  const taste = useMemo(() => listeningTaste(snapshot?.history ?? [], snapshot?.favorites ?? []), [snapshot?.history, snapshot?.favorites])
+  const history = snapshot?.history ?? noEntries
+  const favorites = snapshot?.favorites ?? noEntries
+  const taste = useMemo(() => listeningTaste(history, favorites), [history, favorites])
   const artists = JSON.stringify([...taste.artists.values()].sort((a, b) => b.score - a.score).slice(0, 4).map(artist => artist.name))
   const [songs, setSongs] = useState<SongRow[] | null>(null)
   const [problem, setProblem] = useState(false)
@@ -211,11 +263,17 @@ function HomepagePicks({ grid, albums, albumsLoading, canPlay, onProblem, onSear
   const [collection, setCollection] = useState<HomeCollection | null>(null)
   const [entries, setEntries] = useState<CollectionTrack[] | null>(null)
   const [collectionError, setCollectionError] = useState('')
+  const [editorialCovers, setEditorialCovers] = useState<Record<string, string>>({})
   const request = useRef(0)
   const backButton = useRef<HTMLButtonElement>(null)
   const cardId = useId()
   const previousCard = useRef<string | null>(null)
   const source = listening?.source
+  const isYoutube = source === 'youtube'
+  const isOnline = isYoutube || source === 'soundcloud'
+  const [charts, setCharts] = useState<YoutubeCharts>()
+  const [chartsError, setChartsError] = useState(false)
+  const [chartsRetry, setChartsRetry] = useState(0)
   const revision = listening?.artworkRevision
   useEffect(() => () => { request.current++ }, [])
   useEffect(() => {
@@ -225,6 +283,29 @@ function HomepagePicks({ grid, albums, albumsLoading, canPlay, onProblem, onSear
       previousCard.current = null
     }
   }, [cardId, collection])
+
+  useEffect(() => {
+    if (!source) return
+    let active = true
+    for (const { id, tracks } of editorialPlaylists) {
+      void editorialCover(id, tracks).then(cover => {
+        if (active && cover) setEditorialCovers(covers => ({ ...covers, [id]: cover }))
+      })
+    }
+    return () => { active = false }
+  }, [source])
+
+  useEffect(() => {
+    if (!isYoutube) return
+    let active = true
+    setChartsError(false)
+    void discover.youtubeCharts().then(result => {
+      if (active) setCharts(result)
+    }).catch(() => {
+      if (active) setChartsError(true)
+    })
+    return () => { active = false }
+  }, [isYoutube, chartsRetry])
 
   useEffect(() => {
     if (!source) return
@@ -247,13 +328,18 @@ function HomepagePicks({ grid, albums, albumsLoading, canPlay, onProblem, onSear
   const releases = useMemo(() => recommendReleases(playable, albums, taste), [playable, albums, taste])
   const title = taste.artists.size ? 'Picked for you' : 'From your library'
   const rotation = useMemo(() => recommendSongs(playable, taste), [playable, taste])
-  const repeat = useMemo(() => repeatedSongs(playable, snapshot?.history ?? []), [playable, snapshot?.history])
+  const repeat = useMemo(() => repeatedSongs(playable, history), [playable, history])
+  const rediscover = useMemo(() => rediscoverSongs(playable, history, favorites), [playable, history, favorites])
   const mixes: HomeCollection[] = []
+  const covers = (songs: SongRow[]) => mixCovers(songs, albums, grid ? 320 : 88, revision)
   if (taste.artists.size && rotation.length >= 2) {
-    mixes.push({ kind: 'mix', id: 'rotation', name: 'Your rotation', description: 'Favorites and nearby picks from your library.', songs: rotation })
+    mixes.push({ kind: 'mix', id: 'rotation', name: 'Your rotation', description: 'Favorites and nearby picks from your library.', alternateCovers: covers(rotation), songs: rotation })
   }
   if (repeat.length >= 2) {
-    mixes.push({ kind: 'mix', id: 'on-repeat', name: 'On repeat', description: 'Tracks you’ve played more than once.', songs: repeat })
+    mixes.push({ kind: 'mix', id: 'on-repeat', name: 'On repeat', description: "Tracks you've played more than once.", alternateCovers: covers(repeat), songs: repeat })
+  }
+  if (rediscover.length >= 2) {
+    mixes.push({ kind: 'mix', id: 'rediscover', name: 'Rediscover', description: "Favorites and older listens you haven't played lately.", alternateCovers: covers(rediscover), songs: rediscover })
   }
   const releaseCards: HomeCollection[] = releases.map(({ album, song }) => {
     const cover = album?.artwork_url ? album.id : song.artwork_url ? song.id : null
@@ -290,7 +376,10 @@ function HomepagePicks({ grid, albums, albumsLoading, canPlay, onProblem, onSear
     return <section aria-label={collection.name} className="space-y-3 pt-4">
       <button ref={backButton} className={button} onClick={() => { request.current++; setCollection(null); onProblem(null) }}>Back to Homepage</button>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-rule pb-3">
-        <div><h2 className="text-lg font-semibold">{collection.name}</h2><p className="text-xs text-muted">{collection.description}</p></div>
+        <div>
+          <h2 className="text-lg font-semibold">{collection.name}</h2>
+          <p className="text-xs text-muted">{collection.description}</p>
+        </div>
         <button className={button} disabled={!queue.length || playing} onClick={() => void play(queue)}>
           {collection.kind === 'playlist' && queue.length !== entries?.length ? 'Play cached tracks' : 'Play all'}
         </button>
@@ -306,22 +395,83 @@ function HomepagePicks({ grid, albums, albumsLoading, canPlay, onProblem, onSear
             <span className="font-mono text-[10px] text-muted">{formatTime(entry.song.duration_ms)}</span>
             <button className={button} disabled={playing} aria-label={`Play ${entry.name}`}
               onClick={() => void play(queue, entries.slice(0, index).filter(row => row.song).length)}>Play</button>
-          </> : collection.kind === 'playlist' ? <button className={button} aria-label={`Search SoundCloud for ${entry.name} by ${entry.artist}`}
-            onClick={() => onSearch(`${entry.artist} ${entry.name}`)}>Search SoundCloud</button>
+          </> : collection.kind === 'playlist' && isOnline ? <button className={button} aria-label={`${searchLabel} for ${entry.name} by ${entry.artist}`}
+            onClick={() => onSearch(`${entry.artist} ${entry.name}`)}>{searchLabel}</button>
             : <span className="text-xs text-muted">Unavailable</span>}
         </li>)}</ol>}
     </section>
   }
 
-  return <div className="space-y-6 pt-4">
+  return <div className="space-y-9 pt-5">
+    {isOnline && <div className="flex gap-2 overflow-x-auto pb-1" role="group" aria-label="Browse by mood">
+      {moods.map(([label, term]) => <button type="button" key={label}
+        className="shrink-0 rounded-md border border-rule bg-panel px-3 py-1.5 text-xs font-medium text-ink transition-colors hover:border-muted hover:bg-ink/10"
+        onClick={() => onSearch(term)}>{label}</button>)}
+    </div>}
+    {isYoutube && (charts?.quick.length || charts?.trending.length ? <>
+      <TrackShelf title="Quick picks" tracks={charts.quick} playing={onlinePlaying} onPlay={onOnlinePlay} />
+      <TrackShelf title="Trending on YouTube Music" tracks={charts.trending} playing={onlinePlaying} onPlay={onOnlinePlay} />
+    </> : <section aria-label="Quick picks">
+      <h2 className="text-2xl font-semibold tracking-tight">Quick picks</h2>
+      {chartsError || charts ? <div className="mt-2 flex items-center gap-3 text-xs text-muted">
+        <span>Public picks are unavailable right now.</span>
+        <button className={button} onClick={() => { setCharts(undefined); setChartsRetry(value => value + 1) }}>Retry</button>
+      </div> : <p role="status" className="mt-2 text-xs text-muted">Loading public picks.</p>}
+    </section>)}
     <CollectionShelf cardId={cardId} title={title} description="Picks use your library, favorites, and recent plays on this device." grid={grid} items={albumsLoading ? [] : releaseCards} onOpen={open}>
       {problem ? <div role="alert" className="flex items-center gap-3 text-xs text-muted">Couldn’t load picks from your library.<button className={button} onClick={() => setRetry(value => value + 1)}>Retry</button></div>
         : (albumsLoading || !songs && source) ? <p role="status" className="text-xs text-muted">Finding picks in your library…</p>
-        : !releaseCards.length && <p className="text-xs text-muted">Add music to your library to see picks here. You can also search SoundCloud above.</p>}
+        : !releaseCards.length && <p className="text-xs text-muted">Add music to your library to see picks here.</p>}
     </CollectionShelf>
     {mixes.length > 0 && <CollectionShelf cardId={cardId} title="Made for you" description="Mixes assembled on this device." grid={grid} items={mixes} onOpen={open} />}
-    <CollectionShelf cardId={cardId} title="Capsule Picks" description="Fixed tracklists curated by Capsule." grid={grid} items={capsulePicks} onOpen={open} />
+    <CollectionShelf cardId={cardId} title="Capsule Picks" description="Fixed tracklists curated by Capsule." grid={grid}
+      items={editorialPlaylists.map(playlist => ({ ...playlist, kind: 'playlist', cover: editorialCovers[playlist.id] }))} onOpen={open} />
   </div>
+}
+
+function TrackShelf({ title, tracks, playing, onPlay }: {
+  title: string; tracks: DiscoverTrack[]; playing: boolean; onPlay: (queue: DiscoverTrack[], index: number) => void
+}) {
+  const scroller = useRef<HTMLDivElement>(null)
+  const [edges, setEdges] = useState({ start: true, end: true })
+  function measure() {
+    const node = scroller.current
+    if (node) setEdges({
+      start: node.scrollLeft <= 1,
+      end: node.scrollLeft + node.clientWidth >= node.scrollWidth - 1,
+    })
+  }
+  useEffect(() => {
+    measure()
+    if (!scroller.current || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(scroller.current)
+    return () => observer.disconnect()
+  }, [tracks])
+  function page(direction: -1 | 1) {
+    const node = scroller.current
+    if (node) node.scrollBy({ left: direction * node.clientWidth })
+  }
+  if (!tracks.length) return null
+  return <section className="@container/shelf" aria-label={title}>
+    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
+      <div className="flex items-center gap-1.5">
+        <button type="button" className={button} disabled={playing} aria-label={`Play all ${title}`} onClick={() => onPlay(tracks, 0)}>Play all</button>
+        <button type="button" className={button} disabled={edges.start} aria-label={`Previous ${title}`} onClick={() => page(-1)}><span aria-hidden="true">‹</span></button>
+        <button type="button" className={button} disabled={edges.end} aria-label={`Next ${title}`} onClick={() => page(1)}><span aria-hidden="true">›</span></button>
+      </div>
+    </div>
+    <div ref={scroller} onScroll={measure} className="grid snap-x snap-mandatory auto-cols-[100%] grid-flow-col gap-x-4 gap-y-1 overflow-x-auto pb-1 [scrollbar-width:none] @min-[32rem]/shelf:auto-cols-[calc((100%_-_1rem)/2)] @min-[56rem]/shelf:auto-cols-[calc((100%_-_2rem)/3)]"
+      style={{ gridTemplateRows: `repeat(${Math.min(4, tracks.length)}, minmax(0, 1fr))` }}>
+      {tracks.map((track, index) => <button key={`${track.id}-${index}`} type="button" aria-label={`Play ${track.title}`}
+        disabled={playing} onClick={() => onPlay(tracks, index)}
+        className={`${rowClass} min-w-0 snap-start text-left transition-colors hover:bg-ink/5`}>
+        <Artwork url={track.artwork_url} grid={false} />
+        <TrackLabel title={track.title} artist={track.artist} album={track.album} />
+      </button>)}
+    </div>
+  </section>
 }
 
 async function collectionTracks(collection: HomeCollection, canPlay?: (song: SongRow) => boolean): Promise<CollectionTrack[]> {
@@ -342,7 +492,7 @@ function CollectionShelf({ cardId, title, description, grid, items, onOpen, chil
   onOpen: (item: HomeCollection) => void; children?: React.ReactNode
 }) {
   return <section aria-label={title}>
-    <h2 className="text-sm font-semibold">{title}</h2>
+    <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
     <p className="mb-3 mt-0.5 text-xs text-muted">{description}</p>
     {children}
     <div className={grid ? gridClass : undefined}>
@@ -350,7 +500,8 @@ function CollectionShelf({ cardId, title, description, grid, items, onOpen, chil
         aria-label={`Open ${item.kind} ${item.name}${item.kind === 'album' ? ` by ${item.description}` : ''}`}
         className={`${grid ? cardClass : rowClass} w-full text-left hover:border-muted hover:bg-ink/5`}
         onClick={() => onOpen(item)}>
-        <Artwork url={item.cover ?? null} upgradeUrl={item.coverUpgrade} grid={grid} icon={item.kind === 'album' ? 'albums' : item.kind === 'track' ? 'songs' : 'playlists'} />
+        <Artwork url={item.cover ?? null} alternateUrls={item.alternateCovers} upgradeUrl={item.coverUpgrade} grid={grid}
+          icon={item.kind === 'album' ? 'albums' : item.kind === 'track' ? 'songs' : 'playlists'} />
         <TrackLabel title={item.name} artist={item.description} />
         <span className="shrink-0 text-xs capitalize text-muted">{item.kind}</span>
       </button>)}
@@ -362,10 +513,10 @@ function TrackLabel({ title, artist, album }: { title: string; artist: string; a
   return <span className="block min-w-0 flex-1"><span className="block truncate text-sm" title={title}>{title}</span><span className="block truncate text-xs text-muted">{artist}{album ? ` · ${album}` : ''}</span></span>
 }
 
-function Artwork({ url, upgradeUrl, grid, icon = 'songs' }: {
-  url: string | null; upgradeUrl?: string; grid: boolean; icon?: 'albums' | 'songs' | 'playlists'
+function Artwork({ url, alternateUrls = [], upgradeUrl, grid, icon = 'songs' }: {
+  url: string | null; alternateUrls?: string[]; upgradeUrl?: string; grid: boolean; icon?: 'albums' | 'songs' | 'playlists'
 }) {
-  const [failed, setFailed] = useState<string | null>(null)
+  const [failed, setFailed] = useState<string[]>([])
   const frame = useRef<HTMLSpanElement>(null)
   const [visibleUpgrade, setVisibleUpgrade] = useState<string>()
   const [loadedUpgrade, setLoadedUpgrade] = useState<string>()
@@ -382,9 +533,12 @@ function Artwork({ url, upgradeUrl, grid, icon = 'songs' }: {
     return () => { active = false; observer.disconnect() }
   }, [upgradeUrl])
   const upgraded = upgradeUrl && loadedUpgrade === upgradeUrl
+  const source = [url, ...alternateUrls].find(candidate => candidate && !failed.includes(candidate))
   return <span ref={frame} aria-hidden="true" className={`relative grid shrink-0 place-items-center overflow-hidden rounded bg-panel text-muted ${grid ? 'aspect-square w-full' : 'h-9 w-9'}`}>
     <NavigationIcon name={icon} size={grid ? 26 : 15} />
-    {!upgraded && url && failed !== url && <img alt="" src={url} loading="lazy" referrerPolicy="no-referrer" onError={() => setFailed(url)} className="absolute inset-0 h-full w-full object-cover" />}
+    {!upgraded && source && <img key={source} alt="" src={source} loading="lazy" referrerPolicy="no-referrer"
+      onError={() => setFailed(previous => [...previous, source])}
+      className="absolute inset-0 h-full w-full object-cover" />}
     {upgradeUrl && visibleUpgrade === upgradeUrl && <img alt="" src={upgradeUrl} referrerPolicy="no-referrer" onLoad={() => setLoadedUpgrade(upgradeUrl)} className={`absolute inset-0 h-full w-full object-cover ${upgraded ? '' : 'opacity-0'}`} />}
   </span>
 }

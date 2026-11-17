@@ -12,10 +12,10 @@ pub enum Source {
     Apple,
     #[serde(skip_deserializing)]
     Spotify,
+    #[default]
     Youtube,
     Soundcloud,
     Navidrome,
-    #[default]
     #[serde(other)]
     Local,
 }
@@ -197,7 +197,7 @@ mod tests {
     fn a_missing_file_yields_defaults() {
         let dir = tmp("missing");
         let s = load(&dir);
-        assert_eq!(s.source, Source::Local);
+        assert_eq!(s.source, Source::Youtube);
         assert!(!s.onboarded);
         assert_eq!(s.lyrics.offset_ms, 0);
     }
@@ -246,7 +246,7 @@ mod tests {
     fn an_unknown_source_falls_back_rather_than_failing_the_whole_file() {
         let dir = tmp("unknown-source");
         std::fs::write(path(&dir), "source = \"tidal\"\n").unwrap();
-        assert_eq!(load(&dir), Settings::default());
+        assert_eq!(load(&dir).source, Source::Local);
     }
 
     #[test]

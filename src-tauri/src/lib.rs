@@ -48,6 +48,7 @@ pub struct NowReported {
     pub track_id: Option<String>,
     pub queue_index: Option<usize>,
     pub scrobbled: bool,
+    pub discord_playing: bool,
 }
 
 pub struct AppState {
@@ -303,6 +304,7 @@ pub fn run() {
             import::playback::import_retry_playback,
             soundcloud_playback::soundcloud_play,
             soundcloud::commands::discover_search,
+            import::public_youtube::discover_youtube_charts,
             soundcloud::commands::discover_artist_tracks,
             soundcloud::commands::discover_album_tracks,
             desktop::desktop_snapshot,

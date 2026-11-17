@@ -247,7 +247,7 @@ function LocalPlaylistEditor({ playlistId, entries, onChanged, onComplete }: { p
 }
 
 function PlaybackSources() {
-  const [config, setConfig] = useState<ImportPlaybackSettings>({ youtube_enabled: true, priority: ['local', 'navidrome', 'youtube'] })
+  const [config, setConfig] = useState<ImportPlaybackSettings>({ youtube_enabled: true, priority: ['youtube', 'local', 'navidrome', 'soundcloud'], follows_app_source: true })
   const [loaded, setLoaded] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -281,7 +281,7 @@ function PlaybackSources() {
     const at = ++operation.current
     setBusy(true); setError(null)
     try {
-      await musicImport.setPlaybackSettings(next.youtube_enabled, next.priority)
+      await musicImport.setPlaybackSettings(next.youtube_enabled, next.follows_app_source ? [] : next.priority)
       if (mounted.current && operation.current === at) setConfig(next)
     } catch (reason) {
       if (mounted.current && operation.current === at) setError(message(reason))
@@ -299,16 +299,22 @@ function PlaybackSources() {
         Enable YouTube playback
       </label>
       <label className="block">Preferred playback source
-        <select value={config.priority[0] ?? 'local'} disabled={!loaded || busy} className="ml-2 rounded border border-rule bg-ground p-1 text-ink" onChange={event => {
+        <select value={config.follows_app_source ? 'app' : config.priority[0] ?? 'youtube'} disabled={!loaded || busy} className="ml-2 rounded border border-rule bg-ground p-1 text-ink" onChange={event => {
+          if (event.target.value === 'app') {
+            void persist({ ...config, follows_app_source: true })
+            return
+          }
           const first = event.target.value as MusicPlatform
-          void persist({ ...config, priority: [first, ...config.priority.filter(provider => provider !== first)] })
+          void persist({ ...config, follows_app_source: false, priority: [first, ...config.priority.filter(provider => provider !== first)] })
         }}>
+          <option value="app">Follow app source</option>
           <option value="local">Local files</option>
           <option value="navidrome">Navidrome</option>
           <option value="youtube" disabled={!config.youtube_enabled}>YouTube Music</option>
+          <option value="soundcloud">SoundCloud</option>
         </select>
       </label>
-      <p>Playback tries the preferred available source first, then the remaining saved sources.</p>
+      <p>Imports follow your app source by default and can fall back to other available recordings.</p>
       {error && <div className="space-y-2"><p role="alert" className="text-crit">{error}</p>{!loaded && <Action disabled={busy} onClick={() => void load()}>Reload playback settings</Action>}</div>}
     </div>
   </details>
