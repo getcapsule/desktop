@@ -33,6 +33,7 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.tag || github.ref_name }}
       - name: Verify installer version matches release tag
+        id: version
         shell: pwsh
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -41,6 +42,7 @@ jobs:
           if (-not $version -or $env:RELEASE_TAG -cne "v$version") {
             throw "Release tag '$env:RELEASE_TAG' does not match the Tauri installer version '$version'."
           }
+          "version=$version" >> $env:GITHUB_OUTPUT
       - name: Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -82,6 +84,7 @@ jobs:
 
             **Linux / Arch:** use the `.AppImage` file and mark it executable before opening it.
             **Debian / Ubuntu:** the `.deb` package is also available.
+            ${{ hashFiles('packaging/nix/flake.nix') != '' && format('**NixOS (x86_64):** from your desktop session, run `nix --extra-experimental-features "nix-command flakes" run tarball+{0}/{1}/releases/download/{2}/capsule_{3}_x86_64-linux-flake.tar.gz`.', github.server_url, github.repository, inputs.tag || github.ref_name, steps.version.outputs.version) || '' }}
 
             Local files, Navidrome, public YouTube playback, and SoundCloud are supported.
             Acrylic and mica window materials are Windows-only.
@@ -106,3 +109,40 @@ jobs:
             src-tauri/target/release/bundle/appimage/*.AppImage
             src-tauri/target/release/bundle/deb/*.deb
           if-no-files-found: error
+      - name: Install Nix
+        if: runner.os == 'Linux' && hashFiles('packaging/nix/flake.nix') != ''
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+      - name: Build Nix flake archive
+        if: runner.os == 'Linux' && hashFiles('packaging/nix/flake.nix') != ''
+        id: flake
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          appimage="src-tauri/target/release/bundle/appimage/capsule_${RELEASE_VERSION}_amd64.AppImage"
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/${appimage##*/}"
+          archive="capsule_${RELEASE_VERSION}_x86_64-linux-flake.tar.gz"
+          hash=$(nix hash file "$appimage")
+
+          staging=$(mktemp -d)
+          mkdir "$staging/capsule-flake"
+          install -m 644 packaging/nix/flake.nix packaging/nix/flake.lock "$staging/capsule-flake/"
+          jq -n --arg version "$RELEASE_VERSION" --arg url "$url" --arg hash "$hash" \
+            '{version: $version, url: $url, hash: $hash}' > "$staging/capsule-flake/appimage.json"
+          tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            -czf "$archive" -C "$staging" capsule-flake
+
+          flake="tarball+file://$PWD/$archive"
+          nix flake check --no-update-lock-file "$flake"
+          package=$(nix build --no-link --no-update-lock-file --print-out-paths "$flake")
+          test -x "$package/bin/capsule"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+      - name: Publish Nix flake
+        if: steps.flake.outputs.archive != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          FLAKE_ARCHIVE: ${{ steps.flake.outputs.archive }}
+        run: gh release upload "$RELEASE_TAG" "$FLAKE_ARCHIVE" --clobber
