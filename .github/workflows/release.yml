@@ -32,6 +32,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: refs/tags/${{ inputs.tag || github.ref_name }}
+      - name: Verify installer version matches release tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          $version = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if (-not $version -or $env:RELEASE_TAG -cne "v$version") {
+            throw "Release tag '$env:RELEASE_TAG' does not match the Tauri installer version '$version'."
+          }
       - name: Linux system dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
