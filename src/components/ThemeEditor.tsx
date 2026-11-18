@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { themeFiles, type ThemeDocument } from '../lib/theme-ipc'
 
 const colors = [
@@ -23,7 +23,7 @@ export function ThemeEditor({ activeId, onSaved }: { activeId: string; onSaved: 
   latestSaved.current = onSaved
   const raw = draft ? encode(draft) : null
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (applyingId.current === activeId) {
       applyingId.current = null
       return

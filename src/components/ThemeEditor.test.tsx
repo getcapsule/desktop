@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useLayoutEffect } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ThemeEditor } from './ThemeEditor'
 import { themeFiles } from '../lib/theme-ipc'
@@ -14,6 +15,18 @@ beforeEach(() => {
   vi.mocked(themeFiles.save).mockResolvedValue('custom-new')
 })
 afterEach(cleanup)
+
+it('keeps an edit started before the initial passive effects run', async () => {
+  function OpenOnMount() {
+    useLayoutEffect(() => {
+      screen.getByRole('button', { name: 'Edit theme' }).click()
+    }, [])
+    return <ThemeEditor activeId="capsule" onSaved={() => {}} />
+  }
+
+  render(<OpenOnMount />)
+  expect(await screen.findByLabelText('Theme name')).toHaveProperty('value', 'Original')
+})
 
 it('edits and validates a copy before applying it', async () => {
   const applied = vi.fn()
